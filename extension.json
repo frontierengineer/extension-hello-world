@@ -1,0 +1,5 @@
+{
+  "displayName": "Hello Frontier",
+  "defaultColor": "#4f9cf9",
+  "description": "A tiny UI-only extension that exists to prove the marketplace round trip: repo → release → scan → index → install."
+}
