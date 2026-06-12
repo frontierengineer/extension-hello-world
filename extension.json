@@ -1,5 +1,6 @@
 {
-  "displayName": "Hello Frontier",
-  "defaultColor": "#4f9cf9",
-  "description": "A tiny UI-only extension that exists to prove the marketplace round trip: repo → release → scan → index → install."
+  "displayName": "Hello World",
+  "defaultColor": "#14b8a6",
+  "description": "The reference Frontier extension — one small, heavily-commented example of every capability: server, worker, ui, bus (private/public), Store, Config, MCP, Scheduler, Hooks, and the worker-channel fan-out.",
+  "dataVersion": 2
 }
