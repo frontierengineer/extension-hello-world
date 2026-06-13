@@ -49,11 +49,48 @@ import type { HelloState, WorkerMsg, WorkerInspectReply } from '../messages';
 // own the serialization (JSON.stringify on write, JSON.parse on read). The
 // `state/` prefix is just a namespace inside our own private data dir.
 const STATE_KEY = 'state/hello';
-const SCHEMA_KEY = 'meta/schema_version'; // §2 uses this marker
-const CURRENT_SCHEMA = 2;
 
 function freshState(): HelloState {
   return { count: 0, note: '', updatedAt: new Date().toISOString() };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  §2  migrate() — THE DATA-MIGRATION PATTERN (a host-called export)
+// ═══════════════════════════════════════════════════════════════════════════
+//  WHY this exists: the host NEVER understands an extension's Store — it's raw
+//  bytes WE own. So when our on-disk FORMAT changes across a release (renamed a
+//  field, split a blob, added a structure), WE migrate our OWN data. The host
+//  just gives us the hook and stamps the version so it runs exactly once.
+//
+//  THE CONTRACT (docs/ideas/migrations.md — this is the reference):
+//    • extension.json declares `dataVersion: N` — the format THIS package ships.
+//    • The host keeps its OWN marker of the version our data was last migrated
+//      to (a file beside our data dir — we never see it, never write it).
+//    • On load, BEFORE register() runs, if the marker is behind dataVersion the
+//      host calls this `migrate(from, to, store)` once, then stamps `to`. A
+//      brand-new install with no prior data is stamped straight to N with NO
+//      migrate call (nothing to migrate). A throw leaves the marker behind and
+//      the extension unloaded, so the next reload retries — never half-migrated.
+//
+//  So this is a plain module-level export (not called from register): the host
+//  owns when and whether it runs. Step one version at a time (v1→v2, then v2→v3,
+//  …) so any starting point converges. This example's step is deliberately
+//  trivial — backfill the field v2 added onto a v1 record.
+export async function migrate(fromVersion: number, toVersion: number, store: Store): Promise<void> {
+  if (fromVersion < 2) {
+    const raw = await store.get(STATE_KEY);
+    if (raw !== null) {
+      const old = JSON.parse(raw) as Partial<HelloState>;
+      // v2 added `note`; backfill it on records written by v1.
+      const upgraded: HelloState = {
+        count: typeof old.count === 'number' ? old.count : 0,
+        note: typeof old.note === 'string' ? old.note : '',
+        updatedAt: new Date().toISOString(),
+      };
+      await store.put(STATE_KEY, JSON.stringify(upgraded));
+    }
+  }
+  console.log(`[hello-world] migrated Store ${fromVersion} → ${toVersion}`);
 }
 
 export function register(serverProvider: ServerProvider): void {
@@ -94,57 +131,13 @@ export function register(serverProvider: ServerProvider): void {
     return next;
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  //  §2  migrate() — THE DATA-MIGRATION PATTERN
-  // ─────────────────────────────────────────────────────────────────────────
-  //  WHY this exists: the host NEVER migrates an extension's Store for you. The
-  //  Store is raw bytes the extension owns. So when your on-disk FORMAT changes
-  //  across a release (you renamed a field, split a blob, added a structure),
-  //  the extension migrates its OWN data on load, exactly once, before serving
-  //  any request. This function is that pattern — minimal on purpose so the
-  //  shape is obvious. (docs/ideas/migrations.md points here as the reference.)
-  //
-  //  Two version numbers drive it. `CURRENT_SCHEMA` (the constant above) is the
-  //  format THIS code understands — bump it whenever you change the on-disk
-  //  shape. The `meta/schema_version` marker in the Store is the format the DATA
-  //  on disk was last written at. When the code is newer than the data, migrate
-  //  the gap, then re-stamp the marker. (`dataVersion` in extension.json mirrors
-  //  CURRENT_SCHEMA as a human-facing declaration of the data format the package
-  //  ships; the host doesn't interpret it — the extension owns its own data.)
-  async function migrate(fromVersion: number, toVersion: number, s: Store): Promise<void> {
-    if (fromVersion >= toVersion) return; // data already current — nothing to do
-
-    // Real migrations would transform the stored blobs here, stepping one
-    // version at a time (v1→v2, then v2→v3, …) so any starting point converges.
-    // This example's "migration" is deliberately trivial: ensure the state blob
-    // exists and carries the fields the current code expects.
-    if (fromVersion < 2) {
-      const raw = await s.get(STATE_KEY);
-      if (raw !== null) {
-        const old = JSON.parse(raw) as Partial<HelloState>;
-        // v2 added `note`; backfill it on records written by v1.
-        const upgraded: HelloState = {
-          count: typeof old.count === 'number' ? old.count : 0,
-          note: typeof old.note === 'string' ? old.note : '',
-          updatedAt: new Date().toISOString(),
-        };
-        await s.put(STATE_KEY, JSON.stringify(upgraded));
-      }
-    }
-
-    // Stamp the data as migrated so the next boot is a no-op.
-    await s.put(SCHEMA_KEY, String(toVersion));
-    console.log(`[hello-world] migrated Store ${fromVersion} → ${toVersion}`);
-  }
-
-  // Run the migration on load, then bring the state into existence. We kick
-  // this off and let the responders below await `ready` so no request races a
-  // half-migrated Store.
+  // The data migration is the module-level `migrate()` export above (§2) — the
+  // host runs it BEFORE this register() when our data is behind dataVersion, so
+  // by here the Store is guaranteed to be at the current format. register()
+  // never has to defend against an old shape. All we do on load is make the
+  // state blob exist so the very first UI read gets a real value; responders
+  // below await `ready` so none races that first write.
   const ready = (async () => {
-    const stamped = await store.get(SCHEMA_KEY);
-    const dataVersion = stamped === null ? 1 : parseInt(stamped, 10) || 1;
-    await migrate(dataVersion, CURRENT_SCHEMA, store);
-    // Ensure the key exists so the very first UI read gets a real blob.
     if ((await store.get(STATE_KEY)) === null) await writeState(freshState());
   })();
 
