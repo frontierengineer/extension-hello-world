@@ -6,8 +6,8 @@
 #
 # The tarball is written OUTSIDE the tree being packed (/tmp), or GNU tar exits 1
 # with "file changed as we read it". The excludes keep dev-only files out:
-# .git/.github (repo plumbing), node_modules/data (never shipped — the host
-# installs deps and owns data), and .verify (this repo's local typecheck mirror).
+# .git/.github (repo plumbing) and node_modules/data (never shipped — the host
+# installs deps and owns data).
 name: release
 on:
   push:
@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: tar -czf /tmp/extension.tgz --exclude .git --exclude .github --exclude node_modules --exclude data --exclude .verify .
+      - run: tar -czf /tmp/extension.tgz --exclude .git --exclude .github --exclude node_modules --exclude data .
       - run: gh release create "$GITHUB_REF_NAME" /tmp/extension.tgz --title "$GITHUB_REF_NAME"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
