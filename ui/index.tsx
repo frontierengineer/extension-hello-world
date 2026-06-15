@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════════════
-//  ui/index.tsx — WHAT THE USER SEES
+//  ui/index.tsx — WHAT THE USER SEES (an app)
 // ═══════════════════════════════════════════════════════════════════════════
 //
 //  TIER: ui (the browser-side half). The host bundles this with esbuild
@@ -9,86 +9,94 @@
 //  (`bus.extension.request` ⇄ the server's `respond`; `bus.extension.subscribe`
 //  ⇐ the server's `publish`).
 //
-//  This file demonstrates, each clearly separated:
-//    • views.register     — a top-level tab the extension owns end to end
-//    • sidebar.register    — a section in the sidebar
-//    • commands.register   — a command-palette action with a default keybinding
-//    • modals.prompt       — a host-rendered modal to collect input
-//    • prefs               — device-local UI state (NOT the durable Store)
-//    • bus.extension.*     — calling its own server + rendering live events
+//  In Frontier's shell, an extension IS an app: it owns the ENTIRE content rect.
+//  You register exactly ONE app and render your whole UI into the container the
+//  host hands you. There is no shared tab bar or shared sidebar — your app draws
+//  its own layout (a single view here; richer apps compose @frontierengineer/ui's
+//  AppSidebar / AppTabs / Split). This file is the canonical "hello app": the
+//  smallest complete example an author copies to start a new one.
 //
-//  The host hands each contribution a plain HTMLElement to render into; we use
-//  React (createRoot) but the host doesn't care — it's framework-agnostic.
+//  It demonstrates, each clearly separated:
+//    • ui.app.register     — the ONE app; mount(host) renders the whole view
+//    • ui.commands.register — a command-palette action with a default keybinding
+//    • host.bus.extension.* — calling its own server + rendering live events
+//    • host.services        — reading the substrate (connected machines)
+//    • host.lifecycle       — committing side effects only when activated
+//    • ui.modals.prompt     — a host-rendered modal to collect input
+//
 //  `../../types` is type-only (erased from the bundle); `react` resolves to the
 //  copy this capability vendors (see ui/package.json).
 
-import { useEffect, useState, useCallback } from 'react';
-import { createRoot, type Root } from 'react-dom/client';
-import type { UiProvider, UiV1 } from '../../types';
+import { useCallback, useEffect, useState } from 'react';
+import { createRoot } from 'react-dom/client';
+import type { UiProvider, UiV1, AppHost } from '../../types';
 import type { HelloState } from '../messages'; // our own root file (one level up); the host contract is '../../types' (two)
 
-// We keep a handle to the live `ui` so React components reach the bus/services
-// without prop-drilling. Set once in register().
-let UI: UiV1;
+// The app's launcher glyph: an SVG path `d` drawn in a `0 0 16 16` viewBox and
+// stroked in currentColor (the host tints it with the app's color). A globe —
+// the canonical "hello, world" mark, and clean at icon size.
+const HELLO_ICON = 'M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM1.5 8h13M8 1.5c1.8 1.7 2.8 4 2.8 6.5S9.8 12.8 8 14.5C6.2 12.8 5.2 10.5 5.2 8S6.2 3.2 8 1.5z';
 
 // ── A tiny bus hook: live state from the server ────────────────────────────
 // Fetch the current state once (request → the server's `state.get` responder),
 // then stay live by subscribing to `state.changed` (the server publishes it on
 // every mutation — a bump from here, the MCP tool, or a scheduler tick). This
 // is the whole frontend↔backend loop in one hook.
-function useHelloState(): HelloState | null {
+function useHelloState(bus: UiV1['bus']): HelloState | null {
   const [state, setState] = useState<HelloState | null>(null);
 
   useEffect(() => {
     let alive = true;
-    UI.bus.extension
+    bus.extension
       .request<HelloState>('state.get')
       .then((s) => { if (alive) setState(s); })
       .catch(() => { /* responder briefly absent during a reload — the event below recovers us */ });
 
-    const unsubscribe = UI.bus.extension.subscribe('state.changed', (s: HelloState) => setState(s));
+    const unsubscribe = bus.extension.subscribe('state.changed', (s: HelloState) => setState(s));
     return () => { alive = false; unsubscribe(); };
-  }, []);
+  }, [bus]);
 
   return state;
 }
 
-// ── The view body: the main tab content ────────────────────────────────────
-// Reads live state, bumps the counter via the server, edits the note via a
-// host modal, and renders the worker heartbeats the server fans out to us.
-function HelloView() {
-  const state = useHelloState();
+// ── The whole app: one full view, rendered into host.container ──────────────
+// Reads live state, bumps the counter via the server, edits the note via a host
+// modal, and renders the worker heartbeats the server fans out to us. The app
+// owns its entire rect — here a single scrollable page.
+function HelloApp({ ui, host }: { ui: UiV1; host: AppHost }) {
+  const state = useHelloState(host.bus);
   const [heartbeats, setHeartbeats] = useState<Array<{ machine: string; hostname: string; at: string }>>([]);
 
   // EVENTS: render the live worker→server→bus→UI fan-out. Each heartbeat began
   // on a daemon, went to the server, and the server re-published it to us.
   useEffect(() => {
-    const unsubscribe = UI.bus.extension.subscribe('worker.heartbeat', (hb: any) => {
+    const unsubscribe = host.bus.extension.subscribe('worker.heartbeat', (hb: any) => {
       setHeartbeats((prev) => [hb, ...prev].slice(0, 5));
     });
     return unsubscribe;
-  }, []);
+  }, [host]);
 
-  const bump = useCallback(() => { void UI.bus.extension.request('state.bump', { by: 1 }); }, []);
+  const bump = useCallback(() => { void host.bus.extension.request('state.bump', { by: 1 }); }, [host]);
 
   // MODAL: open a host-rendered prompt to collect the new note, then send it to
   // the server. The host owns the modal — we just await the field values.
   const editNote = useCallback(async () => {
-    const result = await UI.modals.prompt({
+    const result = await ui.modals.prompt({
       title: 'Edit note',
       description: 'Stored in the extension\'s durable Store on the server.',
       fields: [{ key: 'note', label: 'Note', type: 'string', default: state?.note ?? '' }],
       submitLabel: 'Save',
     });
-    if (result) void UI.bus.extension.request('note.set', { note: result.note });
-  }, [state]);
+    if (result) void host.bus.extension.request('note.set', { note: result.note });
+  }, [ui, host, state]);
 
   return (
-    <div style={{ padding: 16, lineHeight: 1.5, fontSize: 14 }}>
+    <div style={{ padding: 24, lineHeight: 1.5, fontSize: 14, maxWidth: 640 }}>
       <h2 style={{ marginTop: 0 }}>Hello World</h2>
       <p style={{ opacity: 0.8 }}>
-        The reference extension. Everything on this page round-trips through the
-        server over the bus — the UI keeps no durable state of its own.
+        The reference Frontier app. The whole page lives in one app that owns its
+        content rect, and everything on it round-trips through the server over the
+        bus — the UI keeps no durable state of its own.
       </p>
 
       <section style={{ margin: '16px 0' }}>
@@ -101,7 +109,7 @@ function HelloView() {
         <button onClick={() => { void editNote(); }} style={{ marginLeft: 8 }}>Edit…</button>
       </section>
 
-      <WorkerInspector />
+      <WorkerInspector host={host} />
 
       <section style={{ margin: '16px 0' }}>
         <strong>Live worker heartbeats</strong> (pushed daemon → server → bus → here):
@@ -123,24 +131,24 @@ function HelloView() {
 // Calls the server's `worker.inspect`, which forwards to the worker component
 // and awaits the correlated reply — surfacing data only code beside the
 // machine's files could produce (hostname, cwd, a directory listing).
-function WorkerInspector() {
+function WorkerInspector({ host }: { host: AppHost }) {
   const [machine, setMachine] = useState('');
   const [result, setResult] = useState<string>('');
 
-  // List connected machines via the host service so the user can pick one.
-  const machines = UI.services.machines.list().filter((m) => m.connected);
+  // List connected machines via the host substrate so the user can pick one.
+  const machines = host.machines.list().filter((m) => m.connected);
 
   const inspect = useCallback(async () => {
     const target = machine || machines[0]?.id;
     if (!target) { setResult('no connected machine'); return; }
     setResult('inspecting…');
     try {
-      const reply = await UI.bus.extension.request('worker.inspect', { machine: target });
+      const reply = await host.bus.extension.request('worker.inspect', { machine: target });
       setResult(JSON.stringify(reply, null, 2));
     } catch (err: any) {
       setResult(`error: ${err?.message || err}`);
     }
-  }, [machine, machines]);
+  }, [host, machine, machines]);
 
   return (
     <section style={{ margin: '16px 0' }}>
@@ -157,94 +165,49 @@ function WorkerInspector() {
   );
 }
 
-// ── The sidebar body: a compact live counter + a Bump button ───────────────
-function HelloSidebar() {
-  const state = useHelloState();
-
-  // PREFS: device-local UI state (a collapsed flag), NOT durable shared data.
-  // Prefs live in this browser's localStorage, namespaced per extension, and
-  // never sync or touch the server Store — perfect for view preferences.
-  const [collapsed, setCollapsed] = useState<boolean>(() => UI.prefs.get('sidebar.collapsed', false) ?? false);
-  const toggle = useCallback(() => {
-    setCollapsed((prev) => {
-      const next = !prev;
-      UI.prefs.set('sidebar.collapsed', next); // persisted on this device only
-      return next;
-    });
-  }, []);
-
-  return (
-    <div style={{ padding: 12, fontSize: 13 }}>
-      <button onClick={toggle} style={{ marginBottom: 8 }}>{collapsed ? 'Show' : 'Hide'} counter</button>
-      {!collapsed && (
-        <div>
-          <div>Counter: <strong>{state ? state.count : '…'}</strong></div>
-          <button
-            className="btn-primary"
-            style={{ marginTop: 8 }}
-            onClick={() => { void UI.bus.extension.request('state.bump', { by: 1 }); }}
-          >
-            Bump
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
 export function register(uiProvider: UiProvider): void {
-  UI = uiProvider.version(1);
-
-  // ── VIEW: a top-level tab the extension owns end to end ───────────────────
-  // The view declares its `tabType` and the route prefix it answers to; the
-  // host runs the routing (path → tabId, tabId → owner) from that declaration.
-  // `mount` renders into a fresh host-owned element; `unmount` tears it down.
-  const viewRoots = new Map<HTMLElement, Root>();
-  UI.views.register({
-    id: 'hello-world.main',
-    tabType: 'hello-world',
-    routes: [{ prefix: '/hello-world', exact: true }],
-    mount: (_tabId, container, ctx) => {
-      ctx.setLabel({ primary: 'Hello World' }); // push the tab's label to the host
-      const root = createRoot(container);
-      viewRoots.set(container, root);
-      root.render(<HelloView />);
-    },
-    unmount: (container) => {
-      viewRoots.get(container)?.unmount();
-      viewRoots.delete(container);
-    },
-  });
-
-  // ── SIDEBAR: a section in the sidebar ─────────────────────────────────────
-  let sidebarRoot: Root | null = null;
-  UI.sidebar.register({
-    id: 'hello-world.sidebar',
-    title: 'Hello World',
-    mount: (container) => {
-      sidebarRoot = createRoot(container);
-      sidebarRoot.render(<HelloSidebar />);
-    },
-    unmount: () => { sidebarRoot?.unmount(); sidebarRoot = null; },
-  });
+  const ui = uiProvider.version(1);
 
   // ── COMMAND: a palette action with a suggested keybinding ─────────────────
-  // Appears in the command palette (Cmd/Ctrl+Shift+P) and runs on the key. Here
-  // it just navigates to the view's tab — `navigate` resolves the path against
-  // the route the view declared above.
-  UI.commands.register({
-    id: 'hello-world.open',
-    label: 'Open Hello World',
+  // Appears in the command palette (Cmd/Ctrl+Shift+P) and runs on the key.
+  // Commands run in the CONTROLLER realm — a different webview from the app's
+  // mount — so a command can't reach the app's React state or host.openApp; it
+  // acts through the substrate. Here it edits the note via a host modal and
+  // sends it to the server over the bus; the open app re-renders from the
+  // server's `state.changed` event. (Switching TO an app is the launcher's /
+  // palette's job, not a command's.)
+  ui.commands.register({
+    id: 'hello-world.edit-note',
+    label: 'Hello World: Edit note',
     category: 'Hello World',
     defaultKey: 'ctrl+alt+h',
-    run: () => UI.navigate('/hello-world'),
+    run: async () => {
+      const result = await ui.modals.prompt({
+        title: 'Edit note',
+        description: 'Stored in the extension\'s durable Store on the server.',
+        fields: [{ key: 'note', label: 'Note', type: 'string' }],
+        submitLabel: 'Save',
+      });
+      if (result) void ui.bus.extension.request('note.set', { note: result.note });
+    },
   });
 
-  // ── WELCOME TILE: a call-to-action on the empty welcome screen ────────────
-  UI.welcome.contribute({
-    id: 'hello-world.welcome',
+  // ── THE APP: one registration that owns the whole content rect ────────────
+  // metadata ({id,title,icon,color}) is declared to the host immediately so the
+  // launcher can draw the icon before the app is ever opened. mount(host) runs
+  // ONCE, the first time the host warms this app's webview; it renders the whole
+  // UI into host.container and returns an optional teardown the host runs if the
+  // user quits the app from the launcher.
+  let root: ReturnType<typeof createRoot> | null = null;
+  ui.app.register({
+    id: 'hello-world',
     title: 'Hello World',
-    description: 'Open the reference extension to see every Frontier capability in one place.',
-    action: { label: 'Open', run: () => UI.navigate('/hello-world') },
+    icon: HELLO_ICON,
+    color: '#14b8a6',
+    mount(host: AppHost) {
+      root = createRoot(host.container);
+      root.render(<HelloApp ui={ui} host={host} />);
+      return () => { root?.unmount(); root = null; };
+    },
   });
 }
