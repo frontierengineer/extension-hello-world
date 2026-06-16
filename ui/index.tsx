@@ -6,30 +6,30 @@
 //  (platform: browser, React pinned to this dir's own copy) and renders it in a
 //  same-origin webview. It runs in a DIFFERENT process from server/index.ts, so
 //  the two never share memory — the UI talks to its server ONLY over the bus
-//  (`bus.extension.request` ⇄ the server's `respond`; `bus.extension.subscribe`
+//  (`bus.application.request` ⇄ the server's `respond`; `bus.application.subscribe`
 //  ⇐ the server's `publish`).
 //
-//  In Frontier's shell, an extension IS an app: it owns the ENTIRE content rect.
-//  You register exactly ONE app and render your whole UI into the container the
-//  host hands you. There is no shared tab bar or shared sidebar — your app draws
-//  its own layout (a single view here; richer apps compose @frontierengineer/ui's
-//  AppSidebar / AppTabs / Split). This file is the canonical "hello app": the
-//  smallest complete example an author copies to start a new one.
+//  In Frontier's shell, an application owns the ENTIRE content rect. You register
+//  exactly ONE app and render your whole UI into the container the host hands
+//  you. There is no shared tab bar or shared sidebar — your app draws its own
+//  layout (a single view here; richer apps compose @frontierengineer/ui's
+//  ApplicationSidebar / ApplicationTabs / Split). This file is the canonical
+//  "hello app": the smallest complete example an author copies to start a new one.
 //
 //  It demonstrates, each clearly separated:
-//    • ui.app.register     — the ONE app; mount(host) renders the whole view
-//    • ui.commands.register — a command-palette action with a default keybinding
-//    • host.bus.extension.* — calling its own server + rendering live events
-//    • host.services        — reading the substrate (connected machines)
-//    • host.lifecycle       — committing side effects only when activated
-//    • ui.modals.prompt     — a host-rendered modal to collect input
+//    • ui.application.register — the ONE app; mount(host) renders the whole view
+//    • ui.commands.register    — a command-palette action with a default keybinding
+//    • host.bus.application.*  — calling its own server + rendering live events
+//    • host.services           — reading the substrate (connected machines)
+//    • host.lifecycle          — committing side effects only when activated
+//    • ui.modals.prompt        — a host-rendered modal to collect input
 //
 //  `../../types` is type-only (erased from the bundle); `react` resolves to the
 //  copy this capability vendors (see ui/package.json).
 
 import { useCallback, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import type { UiProvider, UiV1, AppHost } from '../../types';
+import type { UiProvider, UiV1, ApplicationHost } from '../../types';
 import type { HelloState } from '../messages'; // our own root file (one level up); the host contract is '../../types' (two)
 
 // The app's launcher glyph: an SVG path `d` drawn in a `0 0 16 16` viewBox and
@@ -47,12 +47,12 @@ function useHelloState(bus: UiV1['bus']): HelloState | null {
 
   useEffect(() => {
     let alive = true;
-    bus.extension
+    bus.application
       .request<HelloState>('state.get')
       .then((s) => { if (alive) setState(s); })
       .catch(() => { /* responder briefly absent during a reload — the event below recovers us */ });
 
-    const unsubscribe = bus.extension.subscribe('state.changed', (s: HelloState) => setState(s));
+    const unsubscribe = bus.application.subscribe('state.changed', (s: HelloState) => setState(s));
     return () => { alive = false; unsubscribe(); };
   }, [bus]);
 
@@ -63,40 +63,40 @@ function useHelloState(bus: UiV1['bus']): HelloState | null {
 // Reads live state, bumps the counter via the server, edits the note via a host
 // modal, and renders the worker heartbeats the server fans out to us. The app
 // owns its entire rect — here a single scrollable page.
-function HelloApp({ ui, host }: { ui: UiV1; host: AppHost }) {
+function HelloApp({ ui, host }: { ui: UiV1; host: ApplicationHost }) {
   const state = useHelloState(host.bus);
   const [heartbeats, setHeartbeats] = useState<Array<{ machine: string; hostname: string; at: string }>>([]);
 
   // EVENTS: render the live worker→server→bus→UI fan-out. Each heartbeat began
   // on a daemon, went to the server, and the server re-published it to us.
   useEffect(() => {
-    const unsubscribe = host.bus.extension.subscribe('worker.heartbeat', (hb: any) => {
+    const unsubscribe = host.bus.application.subscribe('worker.heartbeat', (hb: any) => {
       setHeartbeats((prev) => [hb, ...prev].slice(0, 5));
     });
     return unsubscribe;
   }, [host]);
 
-  const bump = useCallback(() => { void host.bus.extension.request('state.bump', { by: 1 }); }, [host]);
+  const bump = useCallback(() => { void host.bus.application.request('state.bump', { by: 1 }); }, [host]);
 
   // MODAL: open a host-rendered prompt to collect the new note, then send it to
   // the server. The host owns the modal — we just await the field values.
   const editNote = useCallback(async () => {
     const result = await ui.modals.prompt({
       title: 'Edit note',
-      description: 'Stored in the extension\'s durable Store on the server.',
+      description: 'Stored in the application\'s durable Store on the server.',
       fields: [{ key: 'note', label: 'Note', type: 'string', default: state?.note ?? '' }],
       submitLabel: 'Save',
     });
-    if (result) void host.bus.extension.request('note.set', { note: result.note });
+    if (result) void host.bus.application.request('note.set', { note: result.note });
   }, [ui, host, state]);
 
   return (
     <div style={{ padding: 24, lineHeight: 1.5, fontSize: 14, maxWidth: 640 }}>
       <h2 style={{ marginTop: 0 }}>Hello World</h2>
       <p style={{ opacity: 0.8 }}>
-        The reference Frontier app. The whole page lives in one app that owns its
-        content rect, and everything on it round-trips through the server over the
-        bus — the UI keeps no durable state of its own.
+        The reference Frontier application. The whole page lives in one app that
+        owns its content rect, and everything on it round-trips through the server
+        over the bus — the UI keeps no durable state of its own.
       </p>
 
       <section style={{ margin: '16px 0' }}>
@@ -131,7 +131,7 @@ function HelloApp({ ui, host }: { ui: UiV1; host: AppHost }) {
 // Calls the server's `worker.inspect`, which forwards to the worker component
 // and awaits the correlated reply — surfacing data only code beside the
 // machine's files could produce (hostname, cwd, a directory listing).
-function WorkerInspector({ host }: { host: AppHost }) {
+function WorkerInspector({ host }: { host: ApplicationHost }) {
   const [machine, setMachine] = useState('');
   const [result, setResult] = useState<string>('');
 
@@ -143,7 +143,7 @@ function WorkerInspector({ host }: { host: AppHost }) {
     if (!target) { setResult('no connected machine'); return; }
     setResult('inspecting…');
     try {
-      const reply = await host.bus.extension.request('worker.inspect', { machine: target });
+      const reply = await host.bus.application.request('worker.inspect', { machine: target });
       setResult(JSON.stringify(reply, null, 2));
     } catch (err: any) {
       setResult(`error: ${err?.message || err}`);
@@ -171,7 +171,7 @@ export function register(uiProvider: UiProvider): void {
   // ── COMMAND: a palette action with a suggested keybinding ─────────────────
   // Appears in the command palette (Cmd/Ctrl+Shift+P) and runs on the key.
   // Commands run in the CONTROLLER realm — a different webview from the app's
-  // mount — so a command can't reach the app's React state or host.openApp; it
+  // mount — so a command can't reach the app's React state or host.openApplication; it
   // acts through the substrate. Here it edits the note via a host modal and
   // sends it to the server over the bus; the open app re-renders from the
   // server's `state.changed` event. (Switching TO an app is the launcher's /
@@ -184,11 +184,11 @@ export function register(uiProvider: UiProvider): void {
     run: async () => {
       const result = await ui.modals.prompt({
         title: 'Edit note',
-        description: 'Stored in the extension\'s durable Store on the server.',
+        description: 'Stored in the application\'s durable Store on the server.',
         fields: [{ key: 'note', label: 'Note', type: 'string' }],
         submitLabel: 'Save',
       });
-      if (result) void ui.bus.extension.request('note.set', { note: result.note });
+      if (result) void ui.bus.application.request('note.set', { note: result.note });
     },
   });
 
@@ -199,12 +199,12 @@ export function register(uiProvider: UiProvider): void {
   // UI into host.container and returns an optional teardown the host runs if the
   // user quits the app from the launcher.
   let root: ReturnType<typeof createRoot> | null = null;
-  ui.app.register({
+  ui.application.register({
     id: 'hello-world',
     title: 'Hello World',
     icon: HELLO_ICON,
     color: '#14b8a6',
-    mount(host: AppHost) {
+    mount(host: ApplicationHost) {
       root = createRoot(host.container);
       root.render(<HelloApp ui={ui} host={host} />);
       return () => { root?.unmount(); root = null; };

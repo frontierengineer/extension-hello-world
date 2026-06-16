@@ -5,7 +5,7 @@
 //  TIER: mcp (its own host-side capability — like server/, it runs in the host
 //  process, but it contributes TOOLS to AI sessions rather than answering the
 //  UI). A registered tool is visible to EVERY agent turn across all sessions
-//  and all extensions; the host namespaces it by extension id, so the agent
+//  and all applications; the host namespaces it by application id, so the agent
 //  sees this one as `hello-world.bump`.
 //
 //  WHY a separate file from server/index.ts: a capability is a separate module
@@ -16,7 +16,7 @@
 //  into ONE capability — spaces, for instance, keeps its host logic all in mcp/.
 //  Here the demo is clearer split out, and the Store is the honest seam.)
 //
-//  The tool handler runs on the HOST (not the worker), so it has the extension's
+//  The tool handler runs on the HOST (not the worker), so it has the application's
 //  Store, config, etc. — see `mcp.services`.
 
 import type { McpProvider, ToolResult, ToolContext, Store } from '../../types';
@@ -56,8 +56,8 @@ export function register(mcpProvider: McpProvider): void {
     name: 'bump',
     title: 'Bump the Hello World counter',
     description:
-      'Increment the Hello World extension\'s shared counter. Use when asked to ' +
-      'demonstrate that an agent can mutate an extension\'s persisted state via a tool. ' +
+      'Increment the Hello World application\'s shared counter. Use when asked to ' +
+      'demonstrate that an agent can mutate an application\'s persisted state via a tool. ' +
       'Pass `by` to add more than 1.',
     inputSchema: {
       type: 'object',
@@ -73,7 +73,7 @@ export function register(mcpProvider: McpProvider): void {
       // NOTE: this capability can persist, but it can't publish on the server's
       // private bus channel (different capability instance). The UI stays live
       // anyway because the server's Store-backed reads pick this change up; a
-      // production extension that needs an instant push would keep the writer in
+      // production application that needs an instant push would keep the writer in
       // one capability. Kept simple here to show the Store-as-seam pattern.
       return text(`Counter is now ${state.count}.`);
     },

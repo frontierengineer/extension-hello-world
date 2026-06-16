@@ -5,7 +5,7 @@
 //  TIER: worker (the daemon-side component). The host bundles this to a node
 //  CJS module and EVERY connected worker daemon fetches + require()s + registers
 //  it on connect — so this code runs ON THE MACHINE, next to its files, not in
-//  the host. It backs no provider; it exists purely so extension logic can do
+//  the host. It backs no provider; it exists purely so application logic can do
 //  things that only make sense beside the machine (read the local filesystem,
 //  the hostname, the working directory) and stream the results to its own
 //  server code.
@@ -65,7 +65,7 @@ export function register(provider: WorkerProvider): void {
     const msg = raw as WorkerMsg;
     if (msg.kind === 'inspect.req') {
       const res: WorkerMsg = { kind: 'inspect.res', cid: msg.cid, reply: inspect() };
-      channel.send(res); // → this extension's server code on the host
+      channel.send(res); // → this application's server code on the host
     }
   });
 

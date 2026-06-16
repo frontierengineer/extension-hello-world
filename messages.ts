@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────
-// messages.ts — the shared, typed message contract for this extension.
+// messages.ts — the shared, typed message contract for this application.
 //
 // The bus is untyped JSON on the wire; this file is the COMPILE-TIME contract
 // the two halves agree on. `server/index.ts` (host) and `ui/index.tsx`
@@ -7,17 +7,17 @@
 // event and its subscriber, can't drift out of shape without a type error.
 //
 // Three groups, matching the three things that travel between UI and server
-// on this extension's PRIVATE channel (`bus.extension.*`):
+// on this application's PRIVATE channel (`bus.application.*`):
 //   • Requests — UI asks, server answers (request ⇄ respond).
 //   • Events   — server announces, UI (and other server subscribers) listen.
-//   • Public   — the ONE versioned endpoint other extensions may call.
+//   • Public   — the ONE versioned endpoint other applications may call.
 //
 // (The worker↔server channel is a different transport — a raw JSON link, not
 // the bus — so its protocol lives in its own section of server/worker code,
 // not here. See WorkerMsg at the bottom for that shape.)
 // ─────────────────────────────────────────────────────────────────────────
 
-// The single piece of durable state this extension keeps: a counter the user
+// The single piece of durable state this application keeps: a counter the user
 // bumps from the UI or an agent bumps via the MCP tool, plus a free-text note.
 export interface HelloState {
   count: number;
@@ -26,11 +26,11 @@ export interface HelloState {
   updatedAt: string;
 }
 
-// ── Requests: UI → server (bus.extension.request ⇄ bus.extension.respond) ──
+// ── Requests: UI → server (bus.application.request ⇄ bus.application.respond) ──
 //
 // Each key is a request topic; `params` is what the UI sends, `response` is
 // what the server's responder returns. This is the private request/respond
-// surface — only this extension's own UI can call it.
+// surface — only this application's own UI can call it.
 export interface Requests {
   // Read the current persisted state (the counter + note).
   'state.get': { params: Record<string, never>; response: HelloState };
@@ -56,7 +56,7 @@ export interface WorkerInspectReply {
   entries: string[];
 }
 
-// ── Events: server → UI (bus.extension.publish → bus.extension.subscribe) ──
+// ── Events: server → UI (bus.application.publish → bus.application.subscribe) ──
 //
 // Fire-and-forget announcements. The UI subscribes and re-renders; any
 // server-side subscriber would receive them too.
@@ -70,10 +70,10 @@ export interface Events {
   'worker.heartbeat': { machine: string; hostname: string; at: string };
 }
 
-// ── Public: this extension's ONE cross-extension endpoint (versioned) ──────
+// ── Public: this application's ONE cross-application endpoint (versioned) ──────
 //
 // Registered with `bus.public.respond('count.get', 1, …)` and reachable by
-// ANY other extension via `bus.extensions('hello-world').request('count.get')`
+// ANY other application via `bus.applications('hello-world').request('count.get')`
 // — or by a running agent via the host `frontier.bus_call` MCP tool. Only
 // what's registered here is visible across the boundary; the private Requests
 // above are not.
