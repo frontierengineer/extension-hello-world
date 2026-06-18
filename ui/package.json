@@ -1,5 +1,5 @@
 {
-  "name": "application-hello-world-ui",
+  "name": "extension-hello-world-ui",
   "private": true,
   "dependencies": {
     "react": "^18.0.0",

@@ -4,10 +4,10 @@
 //
 //  TIER: hooks (its own host-side capability). The host fires NAMED hooks at
 //  well-defined moments in its flows (e.g. just before / after a session
-//  dispatch). An application registers a handler to run arbitrary work at that
+//  dispatch). An extension registers a handler to run arbitrary work at that
 //  moment. The host attaches NO meaning to what a handler does — a hook is just
 //  a place to plug in. This is what keeps the core ignorant of everything
-//  applications build (VCS, telemetry, policy): it knows it has a "before a turn"
+//  extensions build (VCS, telemetry, policy): it knows it has a "before a turn"
 //  moment and nothing more.
 //
 //  Two dials you DECLARE per handler, because only you know your intent:
@@ -28,7 +28,7 @@ import { HOOKS } from '../../types'; // runtime constant — the canonical hook 
 export function register(hooksProvider: HooksProvider): void {
   const hooks = hooksProvider.version(1);
 
-  // Observe every session dispatch, fire-and-forget. A real application might
+  // Observe every session dispatch, fire-and-forget. A real extension might
   // record telemetry, post a notification, or (blocking) position the working
   // directory. We just log the dispatch's coordinates to show the wiring.
   hooks.register({
