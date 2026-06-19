@@ -17,7 +17,7 @@
 //  "hello app": the smallest complete example an author copies to start a new one.
 //
 //  It demonstrates, each clearly separated:
-//    • ui.extension.register — the ONE app; mount(host) renders the whole view
+//    • ui.application.register — the ONE app; mount(host) renders the whole view
 //    • ui.commands.register    — a command-palette action with a default keybinding
 //    • host.bus.extension.*  — calling its own server + rendering live events
 //    • host.services           — reading the substrate (connected machines)
@@ -199,7 +199,7 @@ export function register(uiProvider: UiProvider): void {
   // UI into host.container and returns an optional teardown the host runs if the
   // user quits the app from the launcher.
   let root: ReturnType<typeof createRoot> | null = null;
-  ui.extension.register({
+  ui.application.register({
     id: 'hello-world',
     title: 'Hello World',
     icon: HELLO_ICON,
