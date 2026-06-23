@@ -10,6 +10,7 @@ Hello World is the friendly first thing to install when you want to see what a F
 
 - A Hello World extension: one page that owns its content, with a greeting and a short note you can edit
 - A counter and live status that refresh by themselves, so you can see the extension staying in sync
+- A "Set note…" button backed by an **action** — the same thing the AI can do for you (just ask it to set the note), so you can watch a single operation work from both a button and the assistant
 - A one-key command (in the command palette) to edit the note from anywhere
 - Live worker heartbeats streamed from a connected machine, to show the full round-trip
 
