@@ -38,6 +38,14 @@ export interface Requests {
   'state.bump': { params: { by?: number }; response: HelloState };
   // Replace the note text and persist; returns the new state.
   'note.set': { params: { note: string }; response: HelloState };
+  // Read the current greeting. This is a SETTING (not app state): it lives in
+  // the retained per-extension key/value config store, not the Store. The UI
+  // owns its editing surface in-app now (there is no host settings panel), so it
+  // reads and writes it through these two requests rather than declaring a
+  // host-rendered schema.
+  'greeting.get': { params: Record<string, never>; response: { greeting: string } };
+  // Replace the greeting and persist it via config.set; returns the new value.
+  'greeting.set': { params: { greeting: string }; response: { greeting: string } };
   // Ask the server to round-trip the worker channel: server sends a request to
   // its worker component on `machine`, the component answers from next to the
   // files, and the server returns that reply. Demonstrates request/response
@@ -64,6 +72,10 @@ export interface Events {
   // Emitted whenever the persisted state changes (a bump, a note edit, a
   // scheduler tick). The UI keeps its view live off this instead of polling.
   'state.changed': HelloState;
+  // Emitted when the greeting setting changes, so an already-open UI (or another
+  // surface) reflects the edit live without re-requesting. The server publishes
+  // it on every greeting.set.
+  'greeting.changed': { greeting: string };
   // The headline fan-out: the worker PUSHED a heartbeat to the server, and the
   // server re-published it here so EVERY connected UI sees it. This is the
   // "a worker reaches the UI by going through its server" path, made visible.

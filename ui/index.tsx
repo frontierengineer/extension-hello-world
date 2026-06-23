@@ -59,12 +59,36 @@ function useHelloState(bus: UiV1['bus']): HelloState | null {
   return state;
 }
 
+// ── The greeting SETTING, live ──────────────────────────────────────────────
+// The same request→subscribe loop as state, but for the in-app SETTING. The
+// greeting used to be a host-rendered Config field; now the extension owns its
+// surface (the editor below) and the value round-trips through the server's
+// greeting.get/set (which persist via config.set). Fetch once, then stay live on
+// `greeting.changed` so an edit from any surface updates the tile immediately.
+function useGreeting(bus: UiV1['bus']): string | null {
+  const [greeting, setGreeting] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    bus.extension
+      .request<{ greeting: string }>('greeting.get')
+      .then((g) => { if (alive) setGreeting(g.greeting); })
+      .catch(() => { /* responder briefly absent during a reload — the event below recovers us */ });
+
+    const unsubscribe = bus.extension.subscribe('greeting.changed', (g: { greeting: string }) => setGreeting(g.greeting));
+    return () => { alive = false; unsubscribe(); };
+  }, [bus]);
+
+  return greeting;
+}
+
 // ── The whole app: one full view, rendered into host.container ──────────────
 // Reads live state, bumps the counter via the server, edits the note via a host
 // modal, and renders the worker heartbeats the server fans out to us. The app
 // owns its entire rect — here a single scrollable page.
 function HelloApp({ ui, host }: { ui: UiV1; host: ExtensionHost }) {
   const state = useHelloState(host.bus);
+  const greeting = useGreeting(host.bus);
   const [heartbeats, setHeartbeats] = useState<Array<{ machine: string; hostname: string; at: string }>>([]);
 
   // EVENTS: render the live worker→server→bus→UI fan-out. Each heartbeat began
@@ -90,14 +114,37 @@ function HelloApp({ ui, host }: { ui: UiV1; host: ExtensionHost }) {
     if (result) void host.bus.extension.request('note.set', { note: result.note });
   }, [ui, host, state]);
 
+  // EDIT THE GREETING SETTING in-app. This is where the setting lives now — no
+  // host settings panel. Collect the new value with a host modal and send it to
+  // the server's greeting.set (which persists via config.set); the tile updates
+  // live off the greeting.changed event the server publishes.
+  const editGreeting = useCallback(async () => {
+    const result = await ui.modals.prompt({
+      title: 'Edit greeting',
+      description: 'A per-extension setting, saved on the server via config.set.',
+      fields: [{ key: 'greeting', label: 'Greeting', type: 'string', default: greeting ?? '' }],
+      submitLabel: 'Save',
+    });
+    if (result) void host.bus.extension.request('greeting.set', { greeting: result.greeting });
+  }, [ui, host, greeting]);
+
   return (
     <div style={{ padding: 24, lineHeight: 1.5, fontSize: 14, maxWidth: 640 }}>
-      <h2 style={{ marginTop: 0 }}>Hello World</h2>
+      <h2 style={{ marginTop: 0 }}>{greeting ?? 'Hello'} World</h2>
       <p style={{ opacity: 0.8 }}>
         The reference Frontier extension. The whole page lives in one app that
         owns its content rect, and everything on it round-trips through the server
         over the bus — the UI keeps no durable state of its own.
       </p>
+
+      <section style={{ margin: '16px 0' }}>
+        <strong>Greeting:</strong>{' '}
+        {greeting === null ? <em style={{ opacity: 0.6 }}>…</em> : <span>{greeting}</span>}{' '}
+        <button onClick={() => { void editGreeting(); }} style={{ marginLeft: 8 }}>Edit…</button>
+        <div style={{ opacity: 0.6, fontSize: 12, marginTop: 2 }}>
+          A setting the extension owns in-app — saved on the server via config.set, no host settings panel.
+        </div>
+      </section>
 
       <section style={{ margin: '16px 0' }}>
         <strong>Counter:</strong> {state ? state.count : '…'}{' '}

@@ -13,7 +13,7 @@
 //  This file demonstrates, each in its own captioned section:
 //    §1  Store          — read/write the extension's durable state
 //    §2  migrate()      — the data-migration pattern across schema versions
-//    §3  Config         — declare a setting + react to edits (config.watch)
+//    §3  Config         — a setting the extension owns the UI for (config.get/set)
 //    §4  Scheduler      — a recurring host-managed timer
 //    §5  Private bus    — request/respond + publish for THIS extension's UI
 //    §6  Public bus     — one versioned endpoint OTHER extensions can call
@@ -142,27 +142,19 @@ export function register(serverProvider: ServerProvider): void {
   })();
 
   // ─────────────────────────────────────────────────────────────────────────
-  //  §3  CONFIG — a user-editable setting + reacting to edits
+  //  §3  CONFIG — a setting the extension OWNS the UI for (in-app)
   // ─────────────────────────────────────────────────────────────────────────
-  //  TIER: server declares; the HOST renders the input in Settings; the USER
-  //  sets it; the extension only READS. Declaring a field is all it takes for
-  //  it to appear in the host's auto-generated settings UI. `config.watch`
-  //  fires when the user saves — the extension reacts live (no reload).
-  config.declare({
-    key: 'greeting',
-    label: 'Greeting',
-    description: 'Text the welcome tile and the worker heartbeat log greet you with.',
-    type: 'string',
-    default: 'Hello',
-  });
-
+  //  TIER: server. `config` is the retained per-extension key/value store
+  //  (config.get/set, persisted to extensions/<id>/config.json). There is no
+  //  host-rendered settings panel: an extension that wants a setting builds its
+  //  OWN editing surface and persists through this store. So the server doesn't
+  //  declare a schema — it just READS the value here (the `greeting()` accessor)
+  //  and exposes get/set to its UI over the bus (§5), and the UI renders the
+  //  control in-app (ui/index.tsx). This is the canonical "settings live in your
+  //  own UI" pattern.
+  const DEFAULT_GREETING = 'Hello';
   // A tiny accessor so other sections read the current value in one place.
-  const greeting = (): string => config.get<string>('greeting') ?? 'Hello';
-
-  // React to the user editing the setting. Auto-cleaned on deregister.
-  config.watch('greeting', (value) => {
-    console.log(`[hello-world] greeting is now: ${value}`);
-  });
+  const greeting = (): string => config.get<string>('greeting') ?? DEFAULT_GREETING;
 
   // ─────────────────────────────────────────────────────────────────────────
   //  §4  SCHEDULER — a recurring, host-managed timer
@@ -211,6 +203,21 @@ export function register(serverProvider: ServerProvider): void {
     const state = await readState();
     state.note = typeof params?.note === 'string' ? params.note : '';
     return writeState(state);
+  });
+
+  // The greeting SETTING, read + written over the bus (its in-app surface lives
+  // in ui/index.tsx). The UI never touches config directly — it asks the server,
+  // so there is one writer and one source of truth (the same rule as the Store
+  // in §1). `set` persists via config.set and announces the change so an open UI
+  // updates live.
+  bus.extension.respond('greeting.get', async () => ({ greeting: greeting() }));
+
+  bus.extension.respond('greeting.set', async (params: { greeting: string }) => {
+    const value = (typeof params?.greeting === 'string' ? params.greeting : '').trim() || DEFAULT_GREETING;
+    await config.set('greeting', value); // async: resolves once the write hits disk
+    bus.extension.publish('greeting.changed', { greeting: value });
+    console.log(`[hello-world] greeting is now: ${value}`);
+    return { greeting: value };
   });
 
   // ─────────────────────────────────────────────────────────────────────────
