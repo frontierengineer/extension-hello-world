@@ -2,7 +2,7 @@
 // messages.ts — the shared, typed message contract for this extension.
 //
 // The bus is untyped JSON on the wire; this file is the COMPILE-TIME contract
-// the two halves agree on. `server/index.ts` (host) and `ui/index.tsx`
+// the two halves agree on. `server/index.ts` (host) and `surface/index.tsx`
 // (browser) both import these types so a request and its responder, or an
 // event and its subscriber, can't drift out of shape without a type error.
 //

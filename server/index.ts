@@ -7,7 +7,7 @@
 //  (over the bus) and the worker component (over the worker channel) — so it
 //  sits in the middle and everything routes through it:
 //
-//        ui/index.tsx  ──bus.extension──►  server/index.ts  ──workers.channel──►  worker/index.ts
+//        surface/index.tsx  ──bus.extension──►  server/index.ts  ──workers.channel──►  worker/index.ts
 //        (the browser)  ◄────────────────     (THIS FILE)      ◄──────────────────   (the daemon)
 //
 //  This file demonstrates, each in its own captioned section:
@@ -150,7 +150,7 @@ export function register(serverProvider: ServerProvider): void {
   //  OWN editing surface and persists through this store. So the server doesn't
   //  declare a schema — it just READS the value here (the `greeting()` accessor)
   //  and exposes get/set to its UI over the bus (§5), and the UI renders the
-  //  control in-app (ui/index.tsx). This is the canonical "settings live in your
+  //  control in-app (surface/index.tsx). This is the canonical "settings live in your
   //  own UI" pattern.
   const DEFAULT_GREETING = 'Hello';
   // A tiny accessor so other sections read the current value in one place.
@@ -178,7 +178,7 @@ export function register(serverProvider: ServerProvider): void {
   //  §5  PRIVATE BUS — request/respond + publish for THIS extension's UI
   // ─────────────────────────────────────────────────────────────────────────
   //  TIER: server answers its own UI. `bus.extension` is fully PRIVATE — no
-  //  other extension can see it. A `request` from ui/index.tsx lands on the
+  //  other extension can see it. A `request` from surface/index.tsx lands on the
   //  matching `respond` here; the return value travels back to the UI promise.
   //  `publish` (used in writeState above) fans an event out to every UI that
   //  subscribed. This is the extension's frontend↔backend microservice link.
@@ -206,7 +206,7 @@ export function register(serverProvider: ServerProvider): void {
   });
 
   // The greeting SETTING, read + written over the bus (its in-app surface lives
-  // in ui/index.tsx). The UI never touches config directly — it asks the server,
+  // in surface/index.tsx). The UI never touches config directly — it asks the server,
   // so there is one writer and one source of truth (the same rule as the Store
   // in §1). `set` persists via config.set and announces the change so an open UI
   // updates live.

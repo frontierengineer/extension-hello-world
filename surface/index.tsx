@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════════════
-//  ui/index.tsx — WHAT THE USER SEES (an app)
+//  surface/index.tsx — WHAT THE USER SEES (an app)
 // ═══════════════════════════════════════════════════════════════════════════
 //
 //  TIER: ui (the browser-side half). The host bundles this with esbuild
@@ -32,7 +32,7 @@
 //    • data-help / data-help-title — hover annotations that feed the Info View
 //
 //  `../../types` is type-only (erased from the bundle); `react` resolves to the
-//  copy this capability vendors (see ui/package.json).
+//  copy this capability vendors (see surface/package.json).
 
 import { useCallback, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
