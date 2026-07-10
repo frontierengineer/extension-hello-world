@@ -222,7 +222,7 @@ function WorkerInspector({ host }: { host: ExtensionHost }) {
   const [result, setResult] = useState<string>('');
 
   // List connected machines via the host substrate so the user can pick one.
-  const machines = host.machines.list().filter((m) => m.connected);
+  const machines = host.workers.list().filter((m) => m.connected);
 
   const inspect = useCallback(async () => {
     const target = machine || machines[0]?.id;
