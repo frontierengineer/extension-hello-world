@@ -16,19 +16,36 @@
 //  ExtensionSidebar / ExtensionTabs / Split). This file is the canonical
 //  "hello app": the smallest complete example an author copies to start a new one.
 //
+//  THE AUTHORING MODEL. register() is DECLARATION ONLY — it names the components
+//  this extension contributes and nothing else. There is no logic in register():
+//    • surface.application.register — the ONE app; mount(host) renders the whole view
+//    • surface.daemon.register      — the headless, always-on component that is the
+//                                     HOME for background logic and for every
+//                                     registration whose closure must outlive any
+//                                     visible surface (commands, actions, option
+//                                     sources, uri handlers, status-bar items)
+//
+//  Everything a component does at runtime comes from its MOUNT CONTEXT, never from
+//  register(). The daemon's mount(ctx) is where the logic lives; the app's
+//  mount(host) is where the view renders. Both contexts carry `services`
+//  (SurfaceServices), and `services` is where the bus, prefs, modals, navigate, the
+//  sidebar and overlay controls, and the uri helpers all live.
+//
 //  It demonstrates, each clearly separated:
-//    • ui.application.register — the ONE app; mount(host) renders the whole view
-//    • ui.commands.register    — a command-palette action with a default keybinding
-//    • ui.actions.register     — a typed, agent-callable ACTION with a live picker
-//                                field, rendered as a modal by the host and bound to
-//                                an in-app <ActionButton> (one declaration → human
-//                                modal + agent tool + scheduler; see register())
+//    • surface.application.register — the ONE app; mount(host) renders the whole view
+//    • ctx.commands.register        — (in the daemon) a command-palette entry with a
+//                                     default keybinding
+//    • ctx.actions.register         — (in the daemon) a typed, agent-callable ACTION
+//                                     with a live picker field, rendered as a modal by
+//                                     the host and bound to an in-app <ActionButton>
+//                                     (one declaration → human modal + agent tool +
+//                                     scheduler; see register())
 //    • <ActionButton>          — bind a button to an action: it runs the action AND
 //                                drives the Info View from its docs, no glue code
-//    • host.bus.extension.*  — calling its own server + rendering live events
-//    • host.services           — reading the substrate (connected machines)
+//    • services.bus.extension.* — calling its own server + rendering live events
+//    • services.workers        — reading the substrate (connected machines)
 //    • host.lifecycle          — committing side effects only when activated
-//    • ui.modals.prompt        — a host-rendered modal to collect ad-hoc input
+//    • services.modals.prompt  — a host-rendered modal to collect ad-hoc input
 //    • data-help / data-help-title — hover annotations that feed the Info View
 //
 //  `../../types` is type-only (erased from the bundle); `react` resolves to the
@@ -48,7 +65,7 @@ import { createRoot } from 'react-dom/client';
 // won't tree-shake those out, so importing ActionButton from the root would bloat
 // this minimal app by ~megabytes. The subpath pulls only the action machinery.
 import { ActionButton } from '@frontierengineer/ui/useAction';
-import type { SurfaceProvider, SurfaceV1, ExtensionHost } from '../../types';
+import type { SurfaceProvider, ExtensionHost, Bus } from '../../types';
 import type { HelloState } from '../messages'; // our own root file (one level up); the host contract is '../../types' (two)
 
 // The app's launcher glyph: an SVG path `d` drawn in a `0 0 16 16` viewBox and
@@ -61,7 +78,7 @@ const HELLO_ICON = 'M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM1.5 8h13M8 1.5
 // then stay live by subscribing to `state.changed` (the server publishes it on
 // every mutation — a bump from here, the MCP tool, or a scheduler tick). This
 // is the whole frontend↔backend loop in one hook.
-function useHelloState(bus: SurfaceV1['bus']): HelloState | null {
+function useHelloState(bus: Bus): HelloState | null {
   const [state, setState] = useState<HelloState | null>(null);
 
   useEffect(() => {
@@ -84,7 +101,7 @@ function useHelloState(bus: SurfaceV1['bus']): HelloState | null {
 // surface (the editor below) and the value round-trips through the server's
 // greeting.get/set (which persist to the durable Store). Fetch once, then stay
 // live on `greeting.changed` so an edit from any surface updates the tile.
-function useGreeting(bus: SurfaceV1['bus']): string | null {
+function useGreeting(bus: Bus): string | null {
   const [greeting, setGreeting] = useState<string | null>(null);
 
   useEffect(() => {
@@ -105,26 +122,26 @@ function useGreeting(bus: SurfaceV1['bus']): string | null {
 // Reads live state, bumps the counter via the server, edits the note via a host
 // modal, and renders the worker heartbeats the server fans out to us. The app
 // owns its entire rect — here a single scrollable page.
-function HelloApp({ ui, host }: { ui: SurfaceV1; host: ExtensionHost }) {
-  const state = useHelloState(host.bus);
-  const greeting = useGreeting(host.bus);
+function HelloApp({ host }: { host: ExtensionHost }) {
+  const state = useHelloState(host.services.bus);
+  const greeting = useGreeting(host.services.bus);
   const [heartbeats, setHeartbeats] = useState<Array<{ machine: string; hostname: string; at: string }>>([]);
 
   // EVENTS: render the live worker→server→bus→UI fan-out. Each heartbeat began
   // on a daemon, went to the server, and the server re-published it to us.
   useEffect(() => {
-    const sub = host.bus.extension.subscribe('worker.heartbeat', (hb: any) => {
+    const sub = host.services.bus.extension.subscribe('worker.heartbeat', (hb: any) => {
       setHeartbeats((prev) => [hb, ...prev].slice(0, 5));
     });
     return () => sub.unsubscribe();
   }, [host]);
 
-  const bump = useCallback(() => { void host.bus.extension.request('state.bump', { by: 1 }); }, [host]);
+  const bump = useCallback(() => { void host.services.bus.extension.request('state.bump', { by: 1 }); }, [host]);
 
   // Editing the NOTE is handled by the "hello-world.set_note" ACTION, surfaced via
   // the <ActionButton> in the Note section below — so the same operation is a human
   // modal, an agent tool (frontier.run_action), and a schedulable unit from ONE
-  // declaration (see register()). Contrast it with the ad-hoc ui.modals.prompt used
+  // declaration (see register()). Contrast it with the ad-hoc services.modals.prompt used
   // for the greeting just below: reach for an action when an operation is worth
   // exposing (agent-callable, repeatable); reach for modals.prompt for a quick,
   // surface-local input that isn't a first-class operation.
@@ -134,14 +151,14 @@ function HelloApp({ ui, host }: { ui: SurfaceV1; host: ExtensionHost }) {
   // the server's greeting.set (which persists to the Store); the tile updates
   // live off the greeting.changed event the server publishes.
   const editGreeting = useCallback(async () => {
-    const result = await ui.modals.prompt({
+    const result = await host.services.modals.prompt({
       title: 'Edit greeting',
       description: 'A per-extension setting, saved on the server in its durable Store.',
       fields: [{ key: 'greeting', label: 'Greeting', type: 'string', default: greeting ?? '' }],
       submitLabel: 'Save',
     });
-    if (result) void host.bus.extension.request('greeting.set', { greeting: result.greeting });
-  }, [ui, host, greeting]);
+    if (result) void host.services.bus.extension.request('greeting.set', { greeting: result.greeting });
+  }, [host, greeting]);
 
   return (
     <div style={{ padding: 24, lineHeight: 1.5, fontSize: 14, maxWidth: 640 }}>
@@ -222,14 +239,14 @@ function WorkerInspector({ host }: { host: ExtensionHost }) {
   const [result, setResult] = useState<string>('');
 
   // List connected machines via the host substrate so the user can pick one.
-  const machines = host.workers.list().filter((m) => m.connected);
+  const machines = host.services.workers.list().filter((m) => m.connected);
 
   const inspect = useCallback(async () => {
     const target = machine || machines[0]?.id;
     if (!target) { setResult('no connected machine'); return; }
     setResult('inspecting…');
     try {
-      const reply = await host.bus.extension.request('worker.inspect', { machine: target });
+      const reply = await host.services.bus.extension.request('worker.inspect', { machine: target });
       setResult(JSON.stringify(reply, null, 2));
     } catch (err: any) {
       setResult(`error: ${err?.message || err}`);
@@ -260,83 +277,97 @@ function WorkerInspector({ host }: { host: ExtensionHost }) {
   );
 }
 
-export function register(uiProvider: SurfaceProvider): void {
-  const ui = uiProvider.version(1);
+export function register(surfaceProvider: SurfaceProvider): void {
+  const surface = surfaceProvider.version(1);
 
-  // ── COMMAND: a palette action with a suggested keybinding ─────────────────
-  // Appears in the command palette (Cmd/Ctrl+Shift+P) and runs on the key.
-  // Commands run in the CONTROLLER realm — a different webview from the app's
-  // mount — so a command can't reach the app's React state or host.openExtension; it
-  // acts through the substrate. Here it edits the note via a host modal and
-  // sends it to the server over the bus; the open app re-renders from the
-  // server's `state.changed` event. (Switching TO an app is the launcher's /
-  // palette's job, not a command's.)
-  ui.commands.register({
-    id: 'hello-world.edit-note',
-    label: 'Hello World: Edit note',
-    category: 'Hello World',
-    defaultKey: 'ctrl+alt+h',
-    run: async () => {
-      const result = await ui.modals.prompt({
-        title: 'Edit note',
-        description: 'Stored in the extension\'s durable Store on the server.',
-        fields: [{ key: 'note', label: 'Note', type: 'string' }],
-        submitLabel: 'Save',
+  // ── THE DAEMON: the home for this extension's background logic ─────────────
+  // register() only DECLARES components; the daemon is where logic lives. It is
+  // headless and always running while the extension is enabled, so it is the right
+  // home for the command and the action — registrations whose closures must
+  // outlive any visible surface (a palette invocation or an agent call reaches
+  // them with no app open). mount(ctx) gives it the same runtime substrate a
+  // visible component gets: `ctx.services` (the bus to talk to the server, plus
+  // prefs, modals, and the workers/workspaces substrate), plus the registration
+  // surfaces (ctx.commands, ctx.actions, …).
+  surface.daemon.register({
+    mount(ctx) {
+      // ── COMMAND: a palette entry with a suggested keybinding ──────────────
+      // Appears in the command palette (Cmd/Ctrl+Shift+P) and runs on the key.
+      // A command runs in the daemon — a separate component from the app's
+      // mount — so it can't reach the app's React state or host.openExtension; it
+      // acts through the substrate. Here it edits the note via a host modal and
+      // sends it to the server over the bus; the open app re-renders from the
+      // server's `state.changed` event. (Switching TO an app is the launcher's /
+      // palette's job, not a command's.)
+      ctx.commands.register({
+        id: 'hello-world.edit-note',
+        label: 'Hello World: Edit note',
+        category: 'Hello World',
+        defaultKey: 'ctrl+alt+h',
+        run: async () => {
+          const result = await ctx.services.modals.prompt({
+            title: 'Edit note',
+            description: 'Stored in the extension\'s durable Store on the server.',
+            fields: [{ key: 'note', label: 'Note', type: 'string' }],
+            submitLabel: 'Save',
+          });
+          if (result) void ctx.services.bus.extension.request('note.set', { note: result.note });
+        },
       });
-      if (result) void ui.bus.extension.request('note.set', { note: result.note });
-    },
-  });
 
-  // ── ACTION: a typed, agent-callable operation the host renders a modal for ──
-  //
-  // THE pattern to copy when an operation is worth making first-class. ONE
-  // ui.actions.register declaration yields THREE things with no extra code:
-  //   1. a human modal — the host generates it from `input` (the <ActionButton> in
-  //      the app above triggers it; so does the command palette and a host CTA),
-  //   2. an agent tool — frontier.run_action "hello-world.set_note" runs the SAME
-  //      run() with the SAME input shape (description is written FOR the model),
-  //   3. a schedulable unit — frontier.schedule_action can fire it on a trigger.
-  //
-  // `input` mixes a plain field with a LIVE PICKER: `note` is a text input, and
-  // `workspace` is a real machine→workspace chooser the host populates from the
-  // live fleet — the user never types a raw workspace id, yet the field resolves to
-  // one (so an agent passes a workspaceId string directly). That picker is the
-  // whole reason an action modal can replace a bespoke cascade modal.
-  //
-  // run() executes in THIS controller realm (it reaches the server over the bus),
-  // NEVER on the host. It returns an explicit ActionOutcome: a precondition
-  // violation is `{ ok:false, field, error }` (the host modal highlights that field
-  // inline and keeps itself open — try submitting an empty note), and success
-  // returns a value the <ActionButton>'s onResult / an agent can read.
-  ui.actions.register({
-    id: 'hello-world.set_note',
-    title: 'Set the note',
-    description:
-      'Set the Hello World note — the free-text line the app stores in its durable Store. ' +
-      'Pass `note` (the text). Optionally pass a `workspace` (a workspaceId; the UI shows a ' +
-      'picker) to tag which workspace the note is about — it is appended to the saved text. ' +
-      'Returns the saved note. Same operation as the in-app "Set note…" button.',
-    input: {
-      fields: [
-        { key: 'note', type: 'string', label: 'Note', required: true, placeholder: 'Write a note…', description: 'The text to store.' },
-        // The LIVE picker: a machine→workspace cascade the host renders and fills
-        // from the connected fleet. Optional here — omit it and the note is saved
-        // as-is. Resolves to a workspaceId string (what an agent would pass).
-        { key: 'workspace', type: 'workspace', label: 'About workspace', description: 'Optional — tag the note with a workspace (resolves to its id).' },
-      ],
-    },
-    async run(_ctx, input) {
-      const args = (input ?? {}) as { note?: string; workspace?: string };
-      const note = String(args.note ?? '').trim();
-      // Precondition → an explicit failure naming the offending field, so the host
-      // modal points at it (and an agent gets a stable code) instead of throwing.
-      if (!note) return { ok: false, code: 'empty_note', field: 'note', error: 'A note is required.' };
-      // The picker resolved to a workspace id (or nothing); fold it into the text so
-      // the demo SHOWS the id the picker produced.
-      const workspaceId = args.workspace ? String(args.workspace) : '';
-      const text = workspaceId ? `${note} [re: ${workspaceId}]` : note;
-      await ui.bus.extension.request('note.set', { note: text });
-      return { note: text };
+      // ── ACTION: a typed, agent-callable operation the host renders a modal for
+      //
+      // THE pattern to copy when an operation is worth making first-class. ONE
+      // ctx.actions.register declaration yields THREE things with no extra code:
+      //   1. a human modal — the host generates it from `input` (the <ActionButton> in
+      //      the app triggers it; so does the command palette and a host CTA),
+      //   2. an agent tool — frontier.run_action "hello-world.set_note" runs the SAME
+      //      run() with the SAME input shape (description is written FOR the model),
+      //   3. a schedulable unit — frontier.schedule_action can fire it on a trigger.
+      //
+      // `input` mixes a plain field with a LIVE PICKER: `note` is a text input, and
+      // `workspace` is a real machine→workspace chooser the host populates from the
+      // live fleet — the user never types a raw workspace id, yet the field resolves to
+      // one (so an agent passes a workspaceId string directly). That picker is the
+      // whole reason an action modal can replace a bespoke cascade modal.
+      //
+      // run() executes in THIS daemon (the surface realm; it reaches the server over
+      // the bus), NEVER on the host. It returns an explicit ActionOutcome: a
+      // precondition violation is `{ ok:false, field, error }` (the host modal
+      // highlights that field inline and keeps itself open — try submitting an empty
+      // note), and success returns a value the <ActionButton>'s onResult / an agent
+      // can read.
+      ctx.actions.register({
+        id: 'hello-world.set_note',
+        title: 'Set the note',
+        description:
+          'Set the Hello World note — the free-text line the app stores in its durable Store. ' +
+          'Pass `note` (the text). Optionally pass a `workspace` (a workspaceId; the UI shows a ' +
+          'picker) to tag which workspace the note is about — it is appended to the saved text. ' +
+          'Returns the saved note. Same operation as the in-app "Set note…" button.',
+        input: {
+          fields: [
+            { key: 'note', type: 'string', label: 'Note', required: true, placeholder: 'Write a note…', description: 'The text to store.' },
+            // The LIVE picker: a machine→workspace cascade the host renders and fills
+            // from the connected fleet. Optional here — omit it and the note is saved
+            // as-is. Resolves to a workspaceId string (what an agent would pass).
+            { key: 'workspace', type: 'workspace', label: 'About workspace', description: 'Optional — tag the note with a workspace (resolves to its id).' },
+          ],
+        },
+        async run(_ctx, input) {
+          const args = (input ?? {}) as { note?: string; workspace?: string };
+          const note = String(args.note ?? '').trim();
+          // Precondition → an explicit failure naming the offending field, so the host
+          // modal points at it (and an agent gets a stable code) instead of throwing.
+          if (!note) return { ok: false, code: 'empty_note', field: 'note', error: 'A note is required.' };
+          // The picker resolved to a workspace id (or nothing); fold it into the text so
+          // the demo SHOWS the id the picker produced.
+          const workspaceId = args.workspace ? String(args.workspace) : '';
+          const text = workspaceId ? `${note} [re: ${workspaceId}]` : note;
+          await ctx.services.bus.extension.request('note.set', { note: text });
+          return { note: text };
+        },
+      });
     },
   });
 
@@ -347,14 +378,14 @@ export function register(uiProvider: SurfaceProvider): void {
   // UI into host.container and returns an optional teardown the host runs if the
   // user quits the app from the launcher.
   let root: ReturnType<typeof createRoot> | null = null;
-  ui.application.register({
+  surface.application.register({
     id: 'hello-world',
     title: 'Hello World',
     icon: HELLO_ICON,
     color: '#14b8a6',
     mount(host: ExtensionHost) {
       root = createRoot(host.container);
-      root.render(<HelloApp ui={ui} host={host} />);
+      root.render(<HelloApp host={host} />);
       return () => { root?.unmount(); root = null; };
     },
   });

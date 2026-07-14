@@ -17,3 +17,19 @@ Hello World is the friendly first thing to install when you want to see what a F
 ## Install
 
 Install Hello World from the **Extensions → Marketplace** tab in Frontier: find Hello World, click Install, and it's added to your workspace in one click (Frontier verifies the download before installing). No setup or configuration needed.
+
+## How it's built (for authors)
+
+Hello World is the reference extension — the smallest complete example to copy when starting your own. Read `surface/index.tsx` alongside these notes.
+
+**`register()` is declaration only.** A surface bundle's `register()` names the components the extension contributes and nothing else — there is no logic in it. Hello World declares just two:
+
+- **an application** (`surface.application.register`) — the one component that owns the whole content rect. Its `mount(host)` renders the view.
+- **a daemon** (`surface.daemon.register`) — the headless, always-on component. Declare one only when the extension has always-on logic or registrations whose closures must outlive any visible surface. Everything a command, action, option source, uri handler, or status-bar item does belongs here, because the daemon keeps running while the extension is enabled — so a command invoked from the palette or an action called by the assistant reaches its `run()` with no app open. A purely visual extension declares no daemon at all.
+
+**Logic lives in a mount context, never in `register()`.** Each component gets its capability from its own mount context, scoped to the component's lifetime:
+
+- the daemon's `mount(ctx)` is where the background logic lives. `ctx` carries `services` and the registration surfaces (`ctx.commands`, `ctx.actions`, …). Hello World registers its command and its `hello-world.set_note` action here.
+- the app's `mount(host)` renders the UI. `host` carries the same `services`, plus the container, the warm-keep `lifecycle`, and the host-chrome verbs.
+
+**`services` is the substrate both contexts share.** It carries the `bus` (talk to the extension's own server), the durable `store`, the `workers`/`workspaces`/`sessions` fleet, and the surface helpers an extension reaches for constantly — `services.prefs` (device-local UI state), `services.modals` (host-rendered prompt/confirm dialogs), `services.navigate`, the `sidebar`/`overlay` controls, and the `uri` helpers. Hello World talks to its server through `host.services.bus`, reads connected machines through `host.services.workers`, and opens its greeting dialog through `host.services.modals.prompt`.
