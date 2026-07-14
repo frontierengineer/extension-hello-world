@@ -18,7 +18,7 @@
 //
 //  This file demonstrates, each in its own captioned section:
 //    §1  Store          — read/write the extension's durable state
-//    §2  migrate()      — the data-migration pattern across schema versions
+//    §2  Self-migration — upgrade our OWN Store data across schema versions
 //    §3  Settings       — a setting the extension owns the UI for (Store-backed)
 //    §4  Scheduler      — a recurring host-managed timer
 //    §5  Private bus    — request/respond + publish for THIS extension's UI
@@ -63,29 +63,37 @@ function freshState(): HelloState {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  §2  migrate() — THE DATA-MIGRATION PATTERN (a host-called export)
+//  §2  SELF-MANAGED MIGRATION — upgrade our OWN Store data ourselves
 // ═══════════════════════════════════════════════════════════════════════════
-//  WHY this exists: the host NEVER understands an extension's Store — it's raw
-//  bytes WE own. So when our on-disk FORMAT changes across a release (renamed a
-//  field, split a blob, added a structure), WE migrate our OWN data. The host
-//  just gives us the hook and stamps the version so it runs exactly once.
+//  WHY this lives here now: the host NEVER understands an extension's Store —
+//  it's raw bytes WE own. There is no `dataVersion` manifest field and no
+//  host-called `migrate()` hook anymore; an extension self-manages format
+//  changes inside its OWN stored data. That means WE keep the version marker
+//  (another key in our own Store), WE decide when it runs, and WE step it
+//  forward.
 //
-//  THE CONTRACT (docs/ideas/migrations.md — this is the reference):
-//    • extension.json declares `dataVersion: N` — the format THIS package ships.
-//    • The host keeps its OWN marker of the version our data was last migrated
-//      to (a file beside our data dir — we never see it, never write it).
-//    • On load, BEFORE register() runs, if the marker is behind dataVersion the
-//      host calls this `migrate(from, to, store)` once, then stamps `to`. A
-//      brand-new install with no prior data is stamped straight to N with NO
-//      migrate call (nothing to migrate). A throw leaves the marker behind and
-//      the extension unloaded, so the next reload retries — never half-migrated.
+//  THE PATTERN:
+//    • SCHEMA_VERSION is the format THIS build writes.
+//    • VERSION_KEY holds the version our data was last migrated to — OUR key in
+//      OUR Store (contrast the old model, where the host owned that marker).
+//    • On load, before we serve any request, we read the marker and, if it is
+//      behind, step one version at a time (v1→v2, then v2→v3, …) so any starting
+//      point converges, then stamp the new version. A brand-new install has no
+//      state to migrate: the marker is absent (read as 0) and we simply stamp
+//      the current version. Persisting the blob before the marker means a crash
+//      mid-migration just re-runs the idempotent step on the next load — never
+//      half-migrated.
 //
-//  So this is a plain module-level export (not called from register): the host
-//  owns when and whether it runs. Step one version at a time (v1→v2, then v2→v3,
-//  …) so any starting point converges. This example's step is deliberately
-//  trivial — backfill the field v2 added onto a v1 record.
-export async function migrate(fromVersion: number, toVersion: number, store: Store): Promise<void> {
-  if (fromVersion < 2) {
+//  This example's step is deliberately trivial: backfill the `note` field v2
+//  added onto a v1 record.
+const SCHEMA_VERSION = 2;               // the on-disk format this build writes
+const VERSION_KEY = 'state/version';    // OUR migration marker, in OUR own Store
+
+async function migrateStore(store: Store): Promise<void> {
+  const marker = await store.getJson<number>(VERSION_KEY);
+  const from = marker.ok && typeof marker.value === 'number' ? marker.value : 0;
+  if (from >= SCHEMA_VERSION) return;
+  if (from < 2) {
     const r = await store.getJson<Partial<HelloState>>(STATE_KEY);
     if (!r.ok) throw new Error(r.error.message);
     if (r.value !== null) {
@@ -96,10 +104,11 @@ export async function migrate(fromVersion: number, toVersion: number, store: Sto
         note: typeof old.note === 'string' ? old.note : '',
         updatedAt: new Date().toISOString(),
       };
-      await store.putJson(STATE_KEY, upgraded);
+      await store.putJson({ key: STATE_KEY, value: upgraded });
     }
   }
-  console.log(`[hello-world] migrated Store ${fromVersion} → ${toVersion}`);
+  await store.putJson({ key: VERSION_KEY, value: SCHEMA_VERSION });
+  console.log(`[hello-world] migrated Store ${from} → ${SCHEMA_VERSION}`);
 }
 
 export function register(hostProvider: HostProvider): void {
@@ -131,19 +140,21 @@ export function register(hostProvider: HostProvider): void {
   // open UI re-renders. One helper = every mutation stays consistent.
   async function writeState(next: HelloState): Promise<HelloState> {
     next.updatedAt = new Date().toISOString();
-    await store.putJson(STATE_KEY, next);
+    await store.putJson({ key: STATE_KEY, value: next });
     bus.extension.publish('state.changed', next);
     return next;
   }
 
-  // The data migration is the module-level `migrate()` export above (§2) — the
-  // host runs it BEFORE this register() when our data is behind dataVersion, so
-  // by here the Store is guaranteed to be at the current format. register()
-  // never has to defend against an old shape. All we do on load is make the
-  // state blob exist so the very first UI read gets a real value; responders
-  // below await `ready` so none races that first write.
+  // We own our data migration (§2): run it FIRST, so by the time any responder
+  // below serves a request the Store is guaranteed to be at the current format
+  // and register() never has to defend against an old shape. Then make the state
+  // blob exist so the very first UI read gets a real value. A typed Store read
+  // returns a wrapper, so a miss is `{ value: null }` — read `.value`, never
+  // compare the result object to null. Responders below await `ready` so none
+  // races this startup.
   const ready = (async () => {
-    if ((await store.getString(STATE_KEY)) === null) await writeState(freshState());
+    await migrateStore(store);
+    if ((await store.getString(STATE_KEY)).value === null) await writeState(freshState());
     await loadGreeting();
   })();
 
@@ -179,7 +190,10 @@ export function register(hostProvider: HostProvider): void {
   //  re-announces the current state every few minutes to keep idle UIs fresh.
   scheduler.register({
     id: 'hello-world.heartbeat',
-    schedule: { kind: 'interval', interval: 5 * 60_000 }, // every 5 minutes
+    // A ScheduleSpecification names both axes and nulls the unused one — the
+    // fields are required-and-nullable, so 'interval' sets `interval` and leaves
+    // `cron: null` rather than omitting it.
+    schedule: { kind: 'interval', interval: 5 * 60_000, cron: null }, // every 5 minutes
     handler: async () => {
       await ready;
       const state = await readState();
@@ -227,7 +241,7 @@ export function register(hostProvider: HostProvider): void {
 
   bus.extension.respond('greeting.set', async (params: { greeting: string }) => {
     const value = (typeof params?.greeting === 'string' ? params.greeting : '').trim() || DEFAULT_GREETING;
-    await store.putJson(GREETING_KEY, value); // async: resolves once the write hits disk
+    await store.putJson({ key: GREETING_KEY, value }); // async: resolves once the write hits disk
     currentGreeting = value;
     bus.extension.publish('greeting.changed', { greeting: value });
     console.log(`[hello-world] greeting is now: ${value}`);
@@ -266,7 +280,10 @@ export function register(hostProvider: HostProvider): void {
   //  is what the model reads to decide when to call it — write it for the agent;
   //  `inputSchema` is JSON Schema the host converts for the MCP SDK;
   //  `ctx.sessionId` identifies the agent run (unused here).
-  const text = (t: string): ToolResult => ({ content: [{ type: 'text', text: t }] });
+  // A ToolResult sets `isError` explicitly (null-over-optional): null marks a
+  // normal result; return `isError: true` for a failure the agent should reason
+  // about.
+  const text = (t: string): ToolResult => ({ content: [{ type: 'text', text: t }], isError: null });
   h.mcp.registerTool({
     name: 'bump',
     title: 'Bump the Hello World counter',

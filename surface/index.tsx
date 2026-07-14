@@ -28,8 +28,8 @@
 //  Everything a component does at runtime comes from its MOUNT CONTEXT, never from
 //  register(). The daemon's mount(ctx) is where the logic lives; the app's
 //  mount(host) is where the view renders. Both contexts carry `services`
-//  (SurfaceServices), and `services` is where the bus, prefs, modals, navigate, the
-//  sidebar and overlay controls, and the uri helpers all live.
+//  (SurfaceServices), and `services` is where the bus, localSettings, modals,
+//  navigate, the sidebar and overlay controls, and the uri helpers all live.
 //
 //  It demonstrates, each clearly separated:
 //    • surface.application.register — the ONE app; mount(host) renders the whole view
@@ -154,7 +154,7 @@ function HelloApp({ host }: { host: ExtensionHost }) {
     const result = await host.services.modals.prompt({
       title: 'Edit greeting',
       description: 'A per-extension setting, saved on the server in its durable Store.',
-      fields: [{ key: 'greeting', label: 'Greeting', type: 'string', default: greeting ?? '' }],
+      fields: [{ key: 'greeting', label: 'Greeting', type: 'string', placeholder: null, options: null, required: null, default: greeting ?? '', help: null }],
       submitLabel: 'Save',
     });
     if (result) void host.services.bus.extension.request('greeting.set', { greeting: result.greeting });
@@ -287,8 +287,8 @@ export function register(surfaceProvider: SurfaceProvider): void {
   // outlive any visible surface (a palette invocation or an agent call reaches
   // them with no app open). mount(ctx) gives it the same runtime substrate a
   // visible component gets: `ctx.services` (the bus to talk to the server, plus
-  // prefs, modals, and the workers/workspaces substrate), plus the registration
-  // surfaces (ctx.commands, ctx.actions, …).
+  // localSettings, modals, and the workers/workspaces substrate), plus the
+  // registration surfaces (ctx.commands, ctx.actions, …).
   surface.daemon.register({
     mount(ctx) {
       // ── COMMAND: a palette entry with a suggested keybinding ──────────────
@@ -304,11 +304,13 @@ export function register(surfaceProvider: SurfaceProvider): void {
         label: 'Hello World: Edit note',
         category: 'Hello World',
         defaultKey: 'ctrl+alt+h',
+        group: null,
+        actionId: null,
         run: async () => {
           const result = await ctx.services.modals.prompt({
             title: 'Edit note',
             description: 'Stored in the extension\'s durable Store on the server.',
-            fields: [{ key: 'note', label: 'Note', type: 'string' }],
+            fields: [{ key: 'note', label: 'Note', type: 'string', placeholder: null, options: null, required: null, default: null, help: null }],
             submitLabel: 'Save',
           });
           if (result) void ctx.services.bus.extension.request('note.set', { note: result.note });
@@ -345,13 +347,15 @@ export function register(surfaceProvider: SurfaceProvider): void {
           'Pass `note` (the text). Optionally pass a `workspace` (a workspaceId; the UI shows a ' +
           'picker) to tag which workspace the note is about — it is appended to the saved text. ' +
           'Returns the saved note. Same operation as the in-app "Set note…" button.',
+        output: null,
+        realm: null,
         input: {
           fields: [
-            { key: 'note', type: 'string', label: 'Note', required: true, placeholder: 'Write a note…', description: 'The text to store.' },
+            { key: 'note', type: 'string', label: 'Note', description: 'The text to store.', required: true, default: null, placeholder: 'Write a note…' },
             // The LIVE picker: a machine→workspace cascade the host renders and fills
             // from the connected fleet. Optional here — omit it and the note is saved
             // as-is. Resolves to a workspaceId string (what an agent would pass).
-            { key: 'workspace', type: 'workspace', label: 'About workspace', description: 'Optional — tag the note with a workspace (resolves to its id).' },
+            { key: 'workspace', type: 'workspace', label: 'About workspace', description: 'Optional — tag the note with a workspace (resolves to its id).', required: null },
           ],
         },
         async run(_ctx, input) {
@@ -368,6 +372,9 @@ export function register(surfaceProvider: SurfaceProvider): void {
           return { note: text };
         },
       });
+      // The command and action deregister with the daemon, so there is nothing to
+      // tear down: mount() returns null (the "no teardown" handle).
+      return null;
     },
   });
 
@@ -375,18 +382,20 @@ export function register(surfaceProvider: SurfaceProvider): void {
   // metadata ({id,title,icon,color}) is declared to the host immediately so the
   // launcher can draw the icon before the app is ever opened. mount(host) runs
   // ONCE, the first time the host warms this app's webview; it renders the whole
-  // UI into host.container and returns an optional teardown the host runs if the
-  // user quits the app from the launcher.
+  // UI into host.container and returns a teardown handle ({ dispose() }, or null
+  // when there is nothing to tear down) the host runs if the user quits the app
+  // from the launcher.
   let root: ReturnType<typeof createRoot> | null = null;
   surface.application.register({
     id: 'hello-world',
     title: 'Hello World',
     icon: HELLO_ICON,
     color: '#14b8a6',
+    requires: null,
     mount(host: ExtensionHost) {
       root = createRoot(host.container);
       root.render(<HelloApp host={host} />);
-      return () => { root?.unmount(); root = null; };
+      return { dispose: () => { root?.unmount(); root = null; } };
     },
   });
 }
