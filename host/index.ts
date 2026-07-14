@@ -394,12 +394,12 @@ export function register(hostProvider: HostProvider): void {
   // Tear down the one thing the host can't track for us: settle any in-flight
   // worker requests so their promises don't dangle past a reload. (Bus
   // responders and the schedule are auto-cleaned.)
-  h.deregister(() => {
+  h.deregister({ teardown: () => {
     for (const [cid, resolve] of Array.from(pending.entries())) {
       pending.delete(cid);
       // Resolve with an empty listing rather than leak a hanging promise.
       resolve({ hostname: '', platform: '', cwd: '', entries: [] });
     }
     channels.clear();
-  });
+  } });
 }

@@ -87,5 +87,5 @@ export function register(provider: WorkerProvider): void {
   const timer = setInterval(beat, HEARTBEAT_MS);
 
   // The host can't see our interval — clean it up ourselves on unload.
-  worker.deregister(() => clearInterval(timer));
+  worker.deregister({ teardown: () => clearInterval(timer) });
 }
