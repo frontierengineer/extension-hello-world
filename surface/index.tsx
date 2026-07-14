@@ -48,7 +48,7 @@ import { createRoot } from 'react-dom/client';
 // won't tree-shake those out, so importing ActionButton from the root would bloat
 // this minimal app by ~megabytes. The subpath pulls only the action machinery.
 import { ActionButton } from '@frontierengineer/ui/useAction';
-import type { UiProvider, UiV1, ExtensionHost } from '../../types';
+import type { SurfaceProvider, SurfaceV1, ExtensionHost } from '../../types';
 import type { HelloState } from '../messages'; // our own root file (one level up); the host contract is '../../types' (two)
 
 // The app's launcher glyph: an SVG path `d` drawn in a `0 0 16 16` viewBox and
@@ -61,7 +61,7 @@ const HELLO_ICON = 'M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM1.5 8h13M8 1.5
 // then stay live by subscribing to `state.changed` (the server publishes it on
 // every mutation — a bump from here, the MCP tool, or a scheduler tick). This
 // is the whole frontend↔backend loop in one hook.
-function useHelloState(bus: UiV1['bus']): HelloState | null {
+function useHelloState(bus: SurfaceV1['bus']): HelloState | null {
   const [state, setState] = useState<HelloState | null>(null);
 
   useEffect(() => {
@@ -84,7 +84,7 @@ function useHelloState(bus: UiV1['bus']): HelloState | null {
 // surface (the editor below) and the value round-trips through the server's
 // greeting.get/set (which persist to the durable Store). Fetch once, then stay
 // live on `greeting.changed` so an edit from any surface updates the tile.
-function useGreeting(bus: UiV1['bus']): string | null {
+function useGreeting(bus: SurfaceV1['bus']): string | null {
   const [greeting, setGreeting] = useState<string | null>(null);
 
   useEffect(() => {
@@ -105,7 +105,7 @@ function useGreeting(bus: UiV1['bus']): string | null {
 // Reads live state, bumps the counter via the server, edits the note via a host
 // modal, and renders the worker heartbeats the server fans out to us. The app
 // owns its entire rect — here a single scrollable page.
-function HelloApp({ ui, host }: { ui: UiV1; host: ExtensionHost }) {
+function HelloApp({ ui, host }: { ui: SurfaceV1; host: ExtensionHost }) {
   const state = useHelloState(host.bus);
   const greeting = useGreeting(host.bus);
   const [heartbeats, setHeartbeats] = useState<Array<{ machine: string; hostname: string; at: string }>>([]);
@@ -260,7 +260,7 @@ function WorkerInspector({ host }: { host: ExtensionHost }) {
   );
 }
 
-export function register(uiProvider: UiProvider): void {
+export function register(uiProvider: SurfaceProvider): void {
   const ui = uiProvider.version(1);
 
   // ── COMMAND: a palette action with a suggested keybinding ─────────────────

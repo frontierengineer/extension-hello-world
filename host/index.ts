@@ -1,14 +1,20 @@
 // ═══════════════════════════════════════════════════════════════════════════
-//  server/index.ts — THE HUB
+//  host/index.ts — THE HUB
 // ═══════════════════════════════════════════════════════════════════════════
 //
-//  TIER: server (the host-side coordinator). Runs once, in the HOST process,
-//  when the extension loads. It is the only half that can talk to BOTH the UI
+//  REALM: host (the host-process bundle). Runs once, in the HOST process, when
+//  the extension loads. It is the only bundle that can talk to BOTH the UI
 //  (over the bus) and the worker component (over the worker channel) — so it
 //  sits in the middle and everything routes through it:
 //
-//        surface/index.tsx  ──bus.extension──►  server/index.ts  ──workers.channel──►  worker/index.ts
-//        (the browser)  ◄────────────────     (THIS FILE)      ◄──────────────────   (the daemon)
+//        surface/index.tsx  ──bus.extension──►  host/index.ts  ──workers.channel──►  worker/index.ts
+//        (the browser)  ◄────────────────     (THIS FILE)     ◄──────────────────   (the daemon)
+//
+//  An extension is up to three bundles, one directory each — surface/ (browser),
+//  host/ (this), worker/ (each machine's daemon) — compiled, loaded, and run
+//  separately in their own realms. MCP tools and voice overrides live on the
+//  host realm, so this one file both answers the UI and contributes the agent
+//  tool (§7); there is no separate mcp/ bundle.
 //
 //  This file demonstrates, each in its own captioned section:
 //    §1  Store          — read/write the extension's durable state
@@ -17,14 +23,15 @@
 //    §4  Scheduler      — a recurring host-managed timer
 //    §5  Private bus    — request/respond + publish for THIS extension's UI
 //    §6  Public bus     — one versioned endpoint OTHER extensions can call
-//    §7  Worker channel — request/response correlation to the worker component,
+//    §7  MCP            — a tool the agent can call (host realm, shared memory)
+//    §8  Worker channel — request/response correlation to the worker component,
 //                         plus fanning the worker's pushes out to every UI
 //
 //  The contract type comes from the host. `../../types` resolves to the vendored
 //  contract at the repo root here, and to the host-written shim in production —
 //  see README → "How types resolve".
 //
-//  register() receives a PROVIDER; call version(1) for the v1 capability shape.
+//  register() receives a PROVIDER; call version(1) for the v1 realm shape.
 //  Everything registered is auto-tracked and torn down on reload — we only add
 //  a deregister() for state the host can't see (here: the worker heartbeat fan).
 
@@ -34,12 +41,14 @@
 //     a sibling of every installed extension. (Standalone: the vendored copy at
 //     this repo's root, reached the same way — see README.)
 //   • `../messages`   — THIS extension's OWN shared file at its root, one level
-//     up from a capability dir. It is not a host file; it ships with us.
+//     up from a realm dir. It is not a host file; it ships with us.
 import type {
-  ServerProvider,
+  HostProvider,
   Store,
   Scheduler,
   WorkerChannel,
+  ToolResult,
+  ToolContext,
 } from '../../types';
 import type { HelloState, WorkerMsg, WorkerInspectReply } from '../messages';
 
@@ -93,20 +102,21 @@ export async function migrate(fromVersion: number, toVersion: number, store: Sto
   console.log(`[hello-world] migrated Store ${fromVersion} → ${toVersion}`);
 }
 
-export function register(serverProvider: ServerProvider): void {
-  const server = serverProvider.version(1);
+export function register(hostProvider: HostProvider): void {
+  const h = hostProvider.version(1);
   // `bus` is this extension's bus; `workers` reaches its worker component;
-  // `services` are the backing capabilities (store, scheduler, …).
-  const { bus, workers, services } = server;
+  // `services` are the backing capabilities (store, scheduler, …). `mcp`
+  // registers tools the agent can call (§7).
+  const { bus, workers, services } = h;
   const store: Store = services.store;
   const scheduler: Scheduler = services.scheduler;
 
   // ─────────────────────────────────────────────────────────────────────────
   //  §1  STORE — durable, per-extension key/value state
   // ─────────────────────────────────────────────────────────────────────────
-  //  TIER: server owns persistence. The Store is private to this extension
+  //  REALM: host owns persistence. The Store is private to this extension
   //  (its own dir on disk) and survives restarts AND extension updates. The UI
-  //  never touches it directly — it asks the server (see §5), so there is one
+  //  never touches it directly — it asks the host bundle (see §5), so there is one
   //  writer and one source of truth.
 
   // Read the state blob, tolerating an absent/corrupt key by falling back to a
@@ -140,7 +150,7 @@ export function register(serverProvider: ServerProvider): void {
   // ─────────────────────────────────────────────────────────────────────────
   //  §3  SETTINGS — a setting the extension OWNS the UI for (in-app)
   // ─────────────────────────────────────────────────────────────────────────
-  //  TIER: server. There is no config service and no host-rendered settings
+  //  REALM: host. There is no config service and no host-rendered settings
   //  panel: a setting is just durable Store state under a `settings/` prefix,
   //  which the extension reads here and writes from its OWN in-app editing
   //  surface (surface/index.tsx), exposing get/set to its UI over the bus (§5).
@@ -162,7 +172,7 @@ export function register(serverProvider: ServerProvider): void {
   // ─────────────────────────────────────────────────────────────────────────
   //  §4  SCHEDULER — a recurring, host-managed timer
   // ─────────────────────────────────────────────────────────────────────────
-  //  TIER: server. Instead of running its own setInterval, the extension hands
+  //  REALM: host. Instead of running its own setInterval, the extension hands
   //  the host a callback + a schedule; the host owns the timer and disposes it
   //  on reload. This one is a PURE timer (it dispatches no agent turn), so it
   //  takes no reservationId — it must not hold a workspace slot. Here it just
@@ -180,7 +190,7 @@ export function register(serverProvider: ServerProvider): void {
   // ─────────────────────────────────────────────────────────────────────────
   //  §5  PRIVATE BUS — request/respond + publish for THIS extension's UI
   // ─────────────────────────────────────────────────────────────────────────
-  //  TIER: server answers its own UI. `bus.extension` is fully PRIVATE — no
+  //  REALM: host answers its own UI. `bus.extension` is fully PRIVATE — no
   //  other extension can see it. A `request` from surface/index.tsx lands on the
   //  matching `respond` here; the return value travels back to the UI promise.
   //  `publish` (used in writeState above) fans an event out to every UI that
@@ -210,7 +220,7 @@ export function register(serverProvider: ServerProvider): void {
 
   // The greeting SETTING, read + written over the bus (its in-app surface lives
   // in surface/index.tsx). The UI never touches the Store directly — it asks the
-  // server, so there is one writer and one source of truth (the same rule as the
+  // host bundle, so there is one writer and one source of truth (the same rule as the
   // Store state in §1). `set` persists to settings/greeting and announces the
   // change so an open UI updates live.
   bus.extension.respond('greeting.get', async () => { await ready; return { greeting: greeting() }; });
@@ -227,7 +237,7 @@ export function register(serverProvider: ServerProvider): void {
   // ─────────────────────────────────────────────────────────────────────────
   //  §6  PUBLIC BUS — one versioned endpoint OTHER extensions can call
   // ─────────────────────────────────────────────────────────────────────────
-  //  TIER: server, cross-extension contract. `bus.public.respond(topic,
+  //  REALM: host, cross-extension contract. `bus.public.respond(topic,
   //  version, handler)` exposes ONE endpoint outside this extension. Another
   //  extension reaches it read-only via `bus.extensions('hello-world')
   //  .request('count.get')`, and a running agent can reach it via the host
@@ -242,9 +252,49 @@ export function register(serverProvider: ServerProvider): void {
   });
 
   // ─────────────────────────────────────────────────────────────────────────
-  //  §7  WORKER CHANNEL — the headline: talk to the daemon-side component
+  //  §7  MCP — a tool the AGENT can call (same realm as the rest of host/)
   // ─────────────────────────────────────────────────────────────────────────
-  //  TIER: server ⇄ worker. `workers.channel(machine)` is a raw, machine-scoped
+  //  REALM: host. `h.mcp.registerTool` contributes a tool to EVERY agent turn
+  //  across all sessions; the host namespaces it by extension id, so the agent
+  //  sees this one as `hello-world.bump`. MCP is not its own bundle — it lives
+  //  in host/, the same realm (and the same module instance) as the bus
+  //  responders above, so this tool shares memory with them: it reuses the very
+  //  same readState/writeState, and because writeState publishes on the private
+  //  bus, bumping the counter from the agent updates every open UI instantly —
+  //  no Store-polling seam needed. The handler runs on the HOST (not the
+  //  worker), so it has the extension's Store, scheduler, and bus. `description`
+  //  is what the model reads to decide when to call it — write it for the agent;
+  //  `inputSchema` is JSON Schema the host converts for the MCP SDK;
+  //  `ctx.sessionId` identifies the agent run (unused here).
+  const text = (t: string): ToolResult => ({ content: [{ type: 'text', text: t }] });
+  h.mcp.registerTool({
+    name: 'bump',
+    title: 'Bump the Hello World counter',
+    description:
+      'Increment the Hello World extension\'s shared counter. Use when asked to ' +
+      'demonstrate that an agent can mutate an extension\'s persisted state via a tool. ' +
+      'Pass `by` to add more than 1.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        by: { type: 'number', description: 'How much to add (default 1).' },
+      },
+    },
+    handler: async (args: { by?: number }, _ctx: ToolContext): Promise<ToolResult> => {
+      await ready;
+      const state = await readState();
+      state.count += typeof args?.by === 'number' ? args.by : 1;
+      // writeState persists AND publishes state.changed, so every open UI
+      // re-renders the moment the agent bumps the counter.
+      await writeState(state);
+      return text(`Counter is now ${state.count}.`);
+    },
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  //  §8  WORKER CHANNEL — the headline: talk to the daemon-side component
+  // ─────────────────────────────────────────────────────────────────────────
+  //  REALM: host ⇄ worker. `workers.channel(machine)` is a raw, machine-scoped
   //  link to THIS extension's worker component on a connected machine. The
   //  platform guarantees only ordered delivery of opaque JSON — NO request/
   //  response correlation. So we build our own: tag each request with a
@@ -254,8 +304,8 @@ export function register(serverProvider: ServerProvider): void {
   //
   //  We also wire the OTHER direction: the worker PUSHES an unsolicited
   //  `heartbeat`, and we re-publish it on the bus so EVERY UI sees it. That is
-  //  the worker→server→bus→all-UIs fan-out — a worker has no path to the UI of
-  //  its own; it reaches the user by going through its server. THIS is that.
+  //  the worker→host→bus→all-UIs fan-out — a worker has no path to the UI of
+  //  its own; it reaches the user by going through its host bundle. THIS is that.
 
   // One channel per machine, created on first use, each with its onMessage
   // wired exactly once. A channel is a cheap handle over live connection state.
@@ -315,19 +365,19 @@ export function register(serverProvider: ServerProvider): void {
   }
 
   // Expose the round-trip to the UI as a normal private request (§5 surface):
-  // the UI asks the server, the server asks the worker, the answer flows back.
+  // the UI asks the host bundle, which asks the worker, the answer flows back.
   bus.extension.respond('worker.inspect', async (params: { machine: string }) => {
     const machine = typeof params?.machine === 'string' ? params.machine : '';
     if (!machine) throw new Error('worker.inspect: machine required');
     return inspectWorker(machine);
   });
 
-  void ready.then(() => console.log(`[hello-world] server ready (${greeting()})`));
+  void ready.then(() => console.log(`[hello-world] host ready (${greeting()})`));
 
   // Tear down the one thing the host can't track for us: settle any in-flight
   // worker requests so their promises don't dangle past a reload. (Bus
   // responders and the schedule are auto-cleaned.)
-  server.deregister(() => {
+  h.deregister(() => {
     for (const [cid, resolve] of Array.from(pending.entries())) {
       pending.delete(cid);
       // Resolve with an empty listing rather than leak a hanging promise.
