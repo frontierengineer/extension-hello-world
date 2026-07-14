@@ -71,8 +71,8 @@ function useHelloState(bus: UiV1['bus']): HelloState | null {
       .then((s) => { if (alive) setState(s); })
       .catch(() => { /* responder briefly absent during a reload — the event below recovers us */ });
 
-    const unsubscribe = bus.extension.subscribe('state.changed', (s: HelloState) => setState(s));
-    return () => { alive = false; unsubscribe(); };
+    const sub = bus.extension.subscribe('state.changed', (s: HelloState) => setState(s));
+    return () => { alive = false; sub.unsubscribe(); };
   }, [bus]);
 
   return state;
@@ -82,8 +82,8 @@ function useHelloState(bus: UiV1['bus']): HelloState | null {
 // The same request→subscribe loop as state, but for the in-app SETTING. The
 // greeting used to be a host-rendered Config field; now the extension owns its
 // surface (the editor below) and the value round-trips through the server's
-// greeting.get/set (which persist via config.set). Fetch once, then stay live on
-// `greeting.changed` so an edit from any surface updates the tile immediately.
+// greeting.get/set (which persist to the durable Store). Fetch once, then stay
+// live on `greeting.changed` so an edit from any surface updates the tile.
 function useGreeting(bus: UiV1['bus']): string | null {
   const [greeting, setGreeting] = useState<string | null>(null);
 
@@ -94,8 +94,8 @@ function useGreeting(bus: UiV1['bus']): string | null {
       .then((g) => { if (alive) setGreeting(g.greeting); })
       .catch(() => { /* responder briefly absent during a reload — the event below recovers us */ });
 
-    const unsubscribe = bus.extension.subscribe('greeting.changed', (g: { greeting: string }) => setGreeting(g.greeting));
-    return () => { alive = false; unsubscribe(); };
+    const sub = bus.extension.subscribe('greeting.changed', (g: { greeting: string }) => setGreeting(g.greeting));
+    return () => { alive = false; sub.unsubscribe(); };
   }, [bus]);
 
   return greeting;
@@ -113,10 +113,10 @@ function HelloApp({ ui, host }: { ui: UiV1; host: ExtensionHost }) {
   // EVENTS: render the live worker→server→bus→UI fan-out. Each heartbeat began
   // on a daemon, went to the server, and the server re-published it to us.
   useEffect(() => {
-    const unsubscribe = host.bus.extension.subscribe('worker.heartbeat', (hb: any) => {
+    const sub = host.bus.extension.subscribe('worker.heartbeat', (hb: any) => {
       setHeartbeats((prev) => [hb, ...prev].slice(0, 5));
     });
-    return unsubscribe;
+    return () => sub.unsubscribe();
   }, [host]);
 
   const bump = useCallback(() => { void host.bus.extension.request('state.bump', { by: 1 }); }, [host]);
@@ -131,12 +131,12 @@ function HelloApp({ ui, host }: { ui: UiV1; host: ExtensionHost }) {
 
   // EDIT THE GREETING SETTING in-app. This is where the setting lives now — no
   // host settings panel. Collect the new value with a host modal and send it to
-  // the server's greeting.set (which persists via config.set); the tile updates
+  // the server's greeting.set (which persists to the Store); the tile updates
   // live off the greeting.changed event the server publishes.
   const editGreeting = useCallback(async () => {
     const result = await ui.modals.prompt({
       title: 'Edit greeting',
-      description: 'A per-extension setting, saved on the server via config.set.',
+      description: 'A per-extension setting, saved on the server in its durable Store.',
       fields: [{ key: 'greeting', label: 'Greeting', type: 'string', default: greeting ?? '' }],
       submitLabel: 'Save',
     });
@@ -162,11 +162,11 @@ function HelloApp({ ui, host }: { ui: UiV1; host: ExtensionHost }) {
         <button
           onClick={() => { void editGreeting(); }}
           style={{ marginLeft: 8 }}
-          data-help="Edit the greeting shown at the top of this app. It's a per-extension setting saved on the server (config.set) — there is no host settings panel."
+          data-help="Edit the greeting shown at the top of this app. It's a per-extension setting saved on the server in its durable Store — there is no host settings panel."
           data-help-title="Edit greeting"
         >Edit…</button>
         <div style={{ opacity: 0.6, fontSize: 12, marginTop: 2 }}>
-          A setting the extension owns in-app — saved on the server via config.set, no host settings panel.
+          A setting the extension owns in-app — saved on the server in its Store, no host settings panel.
         </div>
       </section>
 

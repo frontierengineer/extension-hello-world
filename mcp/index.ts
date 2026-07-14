@@ -39,13 +39,9 @@ export function register(mcpProvider: McpProvider): void {
   const store: Store = mcp.services.store;
 
   async function readState(): Promise<HelloState> {
-    const raw = await store.get(STATE_KEY);
-    if (raw === null) return freshState();
-    try {
-      return JSON.parse(raw) as HelloState;
-    } catch {
-      return freshState();
-    }
+    const r = await store.getJson<HelloState>(STATE_KEY);
+    if (!r.ok || r.value === null) return freshState();
+    return r.value;
   }
 
   // Register one tool. The `description` is what the model reads to decide when
@@ -69,7 +65,7 @@ export function register(mcpProvider: McpProvider): void {
       const state = await readState();
       state.count += typeof args?.by === 'number' ? args.by : 1;
       state.updatedAt = new Date().toISOString();
-      await store.put(STATE_KEY, JSON.stringify(state));
+      await store.putJson(STATE_KEY, state);
       // NOTE: this capability can persist, but it can't publish on the server's
       // private bus channel (different capability instance). The UI stays live
       // anyway because the server's Store-backed reads pick this change up; a

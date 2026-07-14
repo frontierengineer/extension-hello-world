@@ -13,7 +13,7 @@
 //  This file demonstrates, each in its own captioned section:
 //    §1  Store          — read/write the extension's durable state
 //    §2  migrate()      — the data-migration pattern across schema versions
-//    §3  Config         — a setting the extension owns the UI for (config.get/set)
+//    §3  Settings       — a setting the extension owns the UI for (Store-backed)
 //    §4  Scheduler      — a recurring host-managed timer
 //    §5  Private bus    — request/respond + publish for THIS extension's UI
 //    §6  Public bus     — one versioned endpoint OTHER extensions can call
@@ -38,15 +38,14 @@
 import type {
   ServerProvider,
   Store,
-  Config,
   Scheduler,
   WorkerChannel,
 } from '../../types';
 import type { HelloState, WorkerMsg, WorkerInspectReply } from '../messages';
 
 // ── Store key + defaults ───────────────────────────────────────────────────
-// One key holds the whole state blob as JSON. The Store is raw strings, so WE
-// own the serialization (JSON.stringify on write, JSON.parse on read). The
+// One key holds the whole state blob as JSON, read and written through the
+// Store's typed getJson/putJson pair (it parses/serializes for us). The
 // `state/` prefix is just a namespace inside our own private data dir.
 const STATE_KEY = 'state/hello';
 
@@ -78,16 +77,17 @@ function freshState(): HelloState {
 //  trivial — backfill the field v2 added onto a v1 record.
 export async function migrate(fromVersion: number, toVersion: number, store: Store): Promise<void> {
   if (fromVersion < 2) {
-    const raw = await store.get(STATE_KEY);
-    if (raw !== null) {
-      const old = JSON.parse(raw) as Partial<HelloState>;
+    const r = await store.getJson<Partial<HelloState>>(STATE_KEY);
+    if (!r.ok) throw new Error(r.error.message);
+    if (r.value !== null) {
+      const old = r.value;
       // v2 added `note`; backfill it on records written by v1.
       const upgraded: HelloState = {
         count: typeof old.count === 'number' ? old.count : 0,
         note: typeof old.note === 'string' ? old.note : '',
         updatedAt: new Date().toISOString(),
       };
-      await store.put(STATE_KEY, JSON.stringify(upgraded));
+      await store.putJson(STATE_KEY, upgraded);
     }
   }
   console.log(`[hello-world] migrated Store ${fromVersion} → ${toVersion}`);
@@ -96,10 +96,9 @@ export async function migrate(fromVersion: number, toVersion: number, store: Sto
 export function register(serverProvider: ServerProvider): void {
   const server = serverProvider.version(1);
   // `bus` is this extension's bus; `workers` reaches its worker component;
-  // `services` are the backing capabilities (store, config, scheduler, …).
+  // `services` are the backing capabilities (store, scheduler, …).
   const { bus, workers, services } = server;
   const store: Store = services.store;
-  const config: Config = services.config;
   const scheduler: Scheduler = services.scheduler;
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -113,20 +112,16 @@ export function register(serverProvider: ServerProvider): void {
   // Read the state blob, tolerating an absent/corrupt key by falling back to a
   // fresh default (a brand-new install has no key yet).
   async function readState(): Promise<HelloState> {
-    const raw = await store.get(STATE_KEY);
-    if (raw === null) return freshState();
-    try {
-      return JSON.parse(raw) as HelloState;
-    } catch {
-      return freshState();
-    }
+    const r = await store.getJson<HelloState>(STATE_KEY);
+    if (!r.ok || r.value === null) return freshState();
+    return r.value;
   }
 
   // Persist the state blob AND announce the change on the bus (§5) so every
   // open UI re-renders. One helper = every mutation stays consistent.
   async function writeState(next: HelloState): Promise<HelloState> {
     next.updatedAt = new Date().toISOString();
-    await store.put(STATE_KEY, JSON.stringify(next));
+    await store.putJson(STATE_KEY, next);
     bus.extension.publish('state.changed', next);
     return next;
   }
@@ -138,23 +133,31 @@ export function register(serverProvider: ServerProvider): void {
   // state blob exist so the very first UI read gets a real value; responders
   // below await `ready` so none races that first write.
   const ready = (async () => {
-    if ((await store.get(STATE_KEY)) === null) await writeState(freshState());
+    if ((await store.getString(STATE_KEY)) === null) await writeState(freshState());
+    await loadGreeting();
   })();
 
   // ─────────────────────────────────────────────────────────────────────────
-  //  §3  CONFIG — a setting the extension OWNS the UI for (in-app)
+  //  §3  SETTINGS — a setting the extension OWNS the UI for (in-app)
   // ─────────────────────────────────────────────────────────────────────────
-  //  TIER: server. `config` is the retained per-extension key/value store
-  //  (config.get/set, persisted to extensions/<id>/config.json). There is no
-  //  host-rendered settings panel: an extension that wants a setting builds its
-  //  OWN editing surface and persists through this store. So the server doesn't
-  //  declare a schema — it just READS the value here (the `greeting()` accessor)
-  //  and exposes get/set to its UI over the bus (§5), and the UI renders the
-  //  control in-app (surface/index.tsx). This is the canonical "settings live in your
-  //  own UI" pattern.
+  //  TIER: server. There is no config service and no host-rendered settings
+  //  panel: a setting is just durable Store state under a `settings/` prefix,
+  //  which the extension reads here and writes from its OWN in-app editing
+  //  surface (surface/index.tsx), exposing get/set to its UI over the bus (§5).
+  //  We cache the value in memory so this accessor stays synchronous, seed it
+  //  from the Store as part of `ready` (loadGreeting), and refresh the cache on
+  //  every write. This is the canonical "settings live in your own UI, persisted
+  //  to the Store" pattern.
   const DEFAULT_GREETING = 'Hello';
+  const GREETING_KEY = 'settings/greeting';
+  let currentGreeting = DEFAULT_GREETING;
   // A tiny accessor so other sections read the current value in one place.
-  const greeting = (): string => config.get<string>('greeting') ?? DEFAULT_GREETING;
+  const greeting = (): string => currentGreeting;
+  // Seed / refresh the cached greeting from the Store (settings/greeting).
+  async function loadGreeting(): Promise<void> {
+    const r = await store.getJson<string>(GREETING_KEY);
+    currentGreeting = r.ok && typeof r.value === 'string' && r.value ? r.value : DEFAULT_GREETING;
+  }
 
   // ─────────────────────────────────────────────────────────────────────────
   //  §4  SCHEDULER — a recurring, host-managed timer
@@ -206,15 +209,16 @@ export function register(serverProvider: ServerProvider): void {
   });
 
   // The greeting SETTING, read + written over the bus (its in-app surface lives
-  // in surface/index.tsx). The UI never touches config directly — it asks the server,
-  // so there is one writer and one source of truth (the same rule as the Store
-  // in §1). `set` persists via config.set and announces the change so an open UI
-  // updates live.
-  bus.extension.respond('greeting.get', async () => ({ greeting: greeting() }));
+  // in surface/index.tsx). The UI never touches the Store directly — it asks the
+  // server, so there is one writer and one source of truth (the same rule as the
+  // Store state in §1). `set` persists to settings/greeting and announces the
+  // change so an open UI updates live.
+  bus.extension.respond('greeting.get', async () => { await ready; return { greeting: greeting() }; });
 
   bus.extension.respond('greeting.set', async (params: { greeting: string }) => {
     const value = (typeof params?.greeting === 'string' ? params.greeting : '').trim() || DEFAULT_GREETING;
-    await config.set('greeting', value); // async: resolves once the write hits disk
+    await store.putJson(GREETING_KEY, value); // async: resolves once the write hits disk
+    currentGreeting = value;
     bus.extension.publish('greeting.changed', { greeting: value });
     console.log(`[hello-world] greeting is now: ${value}`);
     return { greeting: value };
@@ -318,11 +322,11 @@ export function register(serverProvider: ServerProvider): void {
     return inspectWorker(machine);
   });
 
-  console.log(`[hello-world] server ready (${greeting()})`);
+  void ready.then(() => console.log(`[hello-world] server ready (${greeting()})`));
 
   // Tear down the one thing the host can't track for us: settle any in-flight
   // worker requests so their promises don't dangle past a reload. (Bus
-  // responders, the config.watch, and the schedule are auto-cleaned.)
+  // responders and the schedule are auto-cleaned.)
   server.deregister(() => {
     for (const [cid, resolve] of Array.from(pending.entries())) {
       pending.delete(cid);
