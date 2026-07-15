@@ -1,5 +1,10 @@
 {
   "displayName": "Hello World",
   "defaultColor": "#14b8a6",
-  "description": "The reference Frontier extension — one small, heavily-commented example of all three realms (surface, host, worker) and the capabilities on them: bus (private/public), Store, MCP tools, Scheduler, and the worker-channel fan-out."
+  "description": "The reference Frontier extension — one small, heavily-commented example of all three realms (surface, host, worker) and the capabilities on them: bus (private/public), Store, MCP tools, Scheduler, and the worker-channel fan-out.",
+  "realms": {
+    "surface": { "applications": ["hello-world"], "sidebars": [], "daemon": true },
+    "host": { "mcpTools": ["bump"], "voice": false },
+    "worker": { "runtime": false, "workspaceProviders": [], "components": true }
+  }
 }
