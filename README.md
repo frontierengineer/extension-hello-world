@@ -41,6 +41,8 @@ Hello World is the reference extension — the smallest complete example to copy
 
 **`mount()` returns an object, never `null`.** Every `mount()` (app, sidebar, daemon) returns `{ dispose?: () => void }`: an object is required — an accidental `void`/`null` return is a type error — `dispose` is optional, and `{}` is the "nothing to tear down" handle. Hello World's daemon returns `{}` (its actions deregister with it); its app returns `{ dispose }` to unmount React.
 
+**All three realms read the same way.** The surface model above — `register()` names components, logic lives in each component's `mount()`, and `mount()` returns the teardown — is now the shape of the **host** and **worker** realms too, so read `host/index.ts` and `worker/index.ts` next to `surface/index.tsx` and they mirror each other. Each of those bundles' `register()` is declaration-only and registers a single daemon (`h.daemon.register(...)` in `host/`, `w.daemon.register(...)` in `worker/`); all of its logic and capability live inside that daemon's `mount()`. That `mount()` receives a **flat** host — a `HostDaemonHost` or `WorkerDaemonHost` with every capability directly on it (`host.store`, `host.scheduler`, `host.channel(machine)`, `host.mcp`; `host.execute`, `host.importWorker` — no `.services.` hop) — and returns the same optional `dispose`. There is no separate top-level unload hook in any realm: Hello World's host daemon returns a `dispose` that settles its in-flight worker requests, and its worker daemon returns one that clears its heartbeat interval — the single teardown path each realm has, captured in `mount` and closed over by `dispose`.
+
 **Declare your realms in `extension.json`.** The `realms` field names, per realm, exactly what the extension contributes:
 
 ```json

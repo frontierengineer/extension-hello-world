@@ -73,7 +73,7 @@ import { createRoot } from 'react-dom/client';
 // won't tree-shake those out, so importing ActionButton from the root would bloat
 // this minimal app by ~megabytes. The subpath pulls only the action machinery.
 import { ActionButton } from '@frontierengineer/ui/useAction';
-import type { SurfaceProvider, ExtensionHost, Bus } from '../../types';
+import type { SurfaceProvider, ViewHost, Bus } from '../../types';
 import type { HelloState } from '../messages'; // our own root file (one level up); the host contract is '../../types' (two)
 
 // The app's launcher glyph: an SVG path `d` drawn in a `0 0 16 16` viewBox and
@@ -130,7 +130,7 @@ function useGreeting(bus: Bus): string | null {
 // Reads live state, bumps the counter via the server, edits the note via a host
 // modal, and renders the worker heartbeats the server fans out to us. The app
 // owns its entire rect — here a single scrollable page.
-function HelloApp({ host }: { host: ExtensionHost }) {
+function HelloApp({ host }: { host: ViewHost }) {
   const state = useHelloState(host.bus);
   const greeting = useGreeting(host.bus);
   const [heartbeats, setHeartbeats] = useState<Array<{ machine: string; hostname: string; at: string }>>([]);
@@ -242,7 +242,7 @@ function HelloApp({ host }: { host: ExtensionHost }) {
 // Calls the server's `worker.inspect`, which forwards to the worker component
 // and awaits the correlated reply — surfacing data only code beside the
 // machine's files could produce (hostname, cwd, a directory listing).
-function WorkerInspector({ host }: { host: ExtensionHost }) {
+function WorkerInspector({ host }: { host: ViewHost }) {
   const [machine, setMachine] = useState('');
   const [result, setResult] = useState<string>('');
 
@@ -326,7 +326,6 @@ export function register(surfaceProvider: SurfaceProvider): void {
         // (this one pops its OWN prompt rather than a host-generated schema modal).
         input: null,
         output: null,
-        realm: null,
         run: async () => {
           const result = await ctx.modals.prompt({
             title: 'Edit note',
@@ -372,7 +371,6 @@ export function register(surfaceProvider: SurfaceProvider): void {
         defaultKey: null,
         group: null,
         output: null,
-        realm: null,
         input: {
           fields: [
             { key: 'note', type: 'string', label: 'Note', description: 'The text to store.', required: true, default: null, placeholder: 'Write a note…' },
@@ -417,7 +415,7 @@ export function register(surfaceProvider: SurfaceProvider): void {
     icon: HELLO_ICON,
     color: '#14b8a6',
     requires: null,
-    mount(host: ExtensionHost) {
+    mount(host: ViewHost) {
       root = createRoot(host.container);
       root.render(<HelloApp host={host} />);
       return { dispose: () => { root?.unmount(); root = null; } };

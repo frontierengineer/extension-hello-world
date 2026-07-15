@@ -5,10 +5,12 @@
 //  REALM: worker (the daemon-side bundle). The host bundles this to a node
 //  CJS module and EVERY connected worker daemon fetches + require()s + registers
 //  it on connect — so this code runs ON THE MACHINE, next to its files, not in
-//  the host. It backs no provider; it exists purely so extension logic can do
-//  things that only make sense beside the machine (read the local filesystem,
-//  the hostname, the working directory) and stream the results to its own
-//  host-bundle code.
+//  the host. Like the surface and host realms, register() is declaration-only: it
+//  names one daemon whose mount() receives the flat WorkerDaemonHost and returns
+//  the teardown. It registers no runtime or workspace provider; it exists purely
+//  so extension logic can do things that only make sense beside the machine (read
+//  the local filesystem, the hostname, the working directory) and stream the
+//  results to its own host-bundle code.
 //
 //  KEY RULE — a worker reaches the UI by going THROUGH its host bundle. A worker
 //  component has NO bus and NO window; the only thing it can talk to is its own
@@ -23,18 +25,26 @@
 
 import * as fs from 'fs';
 import * as os from 'os';
-import type { WorkerProvider } from '../../types';
+import type { WorkerProvider, WorkerDaemonHost } from '../../types';
 import type { WorkerMsg, WorkerInspectReply } from '../messages';
 
 const HEARTBEAT_MS = 30_000; // push a heartbeat to the host twice a minute
 const MAX_ENTRIES = 20;      // cap the directory listing we send back
 
 export function register(provider: WorkerProvider): void {
-  const worker = provider.version(1);
-  // `channel` is this component's end of the link to its host bundle code. `services`
-  // offers worker-located module resolution + the host URL (unused here — this
-  // component needs no extra packages, only node built-ins).
-  const { channel } = worker;
+  const w = provider.version(1);
+  // register() is declaration-only: it names the one daemon this worker bundle
+  // runs. Everything below lives inside that daemon's mount().
+  w.daemon.register({ mount });
+}
+
+// The hello-world worker daemon. Its mount() receives the flat WorkerDaemonHost:
+// `channel` is this component's end of the link to its host bundle code, and the
+// rest (importWorker for worker-located module resolution, hostUrl) sits flat
+// beside it (unused here — this component needs only node built-ins). mount
+// returns the component's teardown as `dispose`.
+function mount(host: WorkerDaemonHost): { dispose?: () => void } {
+  const { channel } = host;
 
   // ── Inspect the machine — something only code beside the files can do ──────
   // Read the hostname, the cwd, and a short listing of that directory. In
@@ -86,6 +96,8 @@ export function register(provider: WorkerProvider): void {
   beat(); // one immediately on connect, so a UI sees life right away
   const timer = setInterval(beat, HEARTBEAT_MS);
 
-  // The host can't see our interval — clean it up ourselves on unload.
-  worker.deregister({ teardown: () => clearInterval(timer) });
+  // The host can't see our interval — clean it up ourselves on unload. This is
+  // the daemon's `dispose`, returned from mount: the single unload hook, the same
+  // shape all three realms use.
+  return { dispose: () => clearInterval(timer) };
 }

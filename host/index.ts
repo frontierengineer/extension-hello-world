@@ -7,7 +7,7 @@
 //  (over the bus) and the worker component (over the worker channel) — so it
 //  sits in the middle and everything routes through it:
 //
-//        surface/index.tsx  ──bus.extension──►  host/index.ts  ──workers.channel──►  worker/index.ts
+//        surface/index.tsx  ──bus.extension──►  host/index.ts  ──host.channel──►  worker/index.ts
 //        (the browser)  ◄────────────────     (THIS FILE)     ◄──────────────────   (the daemon)
 //
 //  An extension is up to three bundles, one directory each — surface/ (browser),
@@ -32,8 +32,13 @@
 //  see README → "How types resolve".
 //
 //  register() receives a PROVIDER; call version(1) for the v1 realm shape.
-//  Everything registered is auto-tracked and torn down on reload — we only add
-//  a deregister() for state the host can't see (here: the worker heartbeat fan).
+//  register() is DECLARATION-ONLY: it names the single daemon this bundle runs
+//  and nothing more. All logic and all capability live inside that daemon's
+//  mount(), which the host calls with the flat HostDaemonHost when the daemon
+//  comes up. Everything registered inside mount is auto-tracked and torn down on
+//  reload; mount RETURNS the one teardown the host can't see for itself (here:
+//  settling the in-flight worker requests) as its `dispose` — the single unload
+//  hook, the same shape all three realms use.
 
 // Two different import depths, and the difference matters:
 //   • `../../types`   — the HOST contract. Two levels up because in production
@@ -44,6 +49,7 @@
 //     up from a realm dir. It is not a host file; it ships with us.
 import type {
   HostProvider,
+  HostDaemonHost,
   Store,
   Scheduler,
   WorkerChannel,
@@ -113,12 +119,20 @@ async function migrateStore(store: Store): Promise<void> {
 
 export function register(hostProvider: HostProvider): void {
   const h = hostProvider.version(1);
-  // `bus` is this extension's bus; `workers` reaches its worker component;
-  // `services` are the backing capabilities (store, scheduler, …). `mcp`
-  // registers tools the agent can call (§7).
-  const { bus, workers, services } = h;
-  const store: Store = services.store;
-  const scheduler: Scheduler = services.scheduler;
+  // register() is declaration-only: it names the one daemon this host bundle
+  // runs. Everything below lives inside that daemon's mount().
+  h.daemon.register({ mount });
+}
+
+// The hello-world host daemon. Its mount() receives the flat HostDaemonHost —
+// every capability sits directly on it: `bus` is this extension's bus,
+// `channel(machine)` reaches its worker component, `store`/`scheduler` are the
+// backing capabilities, and `mcp` registers tools the agent can call (§7). mount
+// returns the extension's one teardown as `dispose`.
+function mount(host: HostDaemonHost): { dispose?: () => void } {
+  const { bus } = host;
+  const store: Store = host.store;
+  const scheduler: Scheduler = host.scheduler;
 
   // ─────────────────────────────────────────────────────────────────────────
   //  §1  STORE — durable, per-extension key/value state
@@ -186,10 +200,10 @@ export function register(hostProvider: HostProvider): void {
   //  REALM: host. Instead of running its own setInterval, the extension hands
   //  the host a callback + a schedule; the host owns the timer and disposes it
   //  on reload. This one is a PURE timer (it dispatches no agent turn), so it
-  //  takes no reservationId — it must not hold a workspace slot. Here it just
-  //  re-announces the current state every few minutes to keep idle UIs fresh.
-  scheduler.register({
-    id: 'hello-world.heartbeat',
+  //  passes reservationId: null — it holds no workspace slot. Here it just
+  //  re-announces the current state every few minutes to keep idle UIs fresh. The
+  //  id is now a top-level argument; the options object carries the rest.
+  scheduler.register('hello-world.heartbeat', {
     // A ScheduleSpecification names both axes and nulls the unused one — the
     // fields are required-and-nullable, so 'interval' sets `interval` and leaves
     // `cron: null` rather than omitting it.
@@ -199,6 +213,8 @@ export function register(hostProvider: HostProvider): void {
       const state = await readState();
       bus.extension.publish('state.changed', state);
     },
+    // A pure timer holds no reservation — null over an omitted optional.
+    reservationId: null,
   });
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -268,7 +284,7 @@ export function register(hostProvider: HostProvider): void {
   // ─────────────────────────────────────────────────────────────────────────
   //  §7  MCP — a tool the AGENT can call (same realm as the rest of host/)
   // ─────────────────────────────────────────────────────────────────────────
-  //  REALM: host. `h.mcp.registerTool` contributes a tool to EVERY agent turn
+  //  REALM: host. `host.mcp.registerTool` contributes a tool to EVERY agent turn
   //  across all sessions; the host namespaces it by extension id, so the agent
   //  sees this one as `hello-world.bump`. MCP is not its own bundle — it lives
   //  in host/, the same realm (and the same module instance) as the bus
@@ -284,7 +300,7 @@ export function register(hostProvider: HostProvider): void {
   // normal result; return `isError: true` for a failure the agent should reason
   // about.
   const text = (t: string): ToolResult => ({ content: [{ type: 'text', text: t }], isError: null });
-  h.mcp.registerTool({
+  host.mcp.registerTool({
     name: 'bump',
     title: 'Bump the Hello World counter',
     description:
@@ -311,7 +327,7 @@ export function register(hostProvider: HostProvider): void {
   // ─────────────────────────────────────────────────────────────────────────
   //  §8  WORKER CHANNEL — the headline: talk to the daemon-side component
   // ─────────────────────────────────────────────────────────────────────────
-  //  REALM: host ⇄ worker. `workers.channel(machine)` is a raw, machine-scoped
+  //  REALM: host ⇄ worker. `host.channel(machine)` is a raw, machine-scoped
   //  link to THIS extension's worker component on a connected machine. The
   //  platform guarantees only ordered delivery of opaque JSON — NO request/
   //  response correlation. So we build our own: tag each request with a
@@ -333,7 +349,7 @@ export function register(hostProvider: HostProvider): void {
   function channelFor(machine: string): WorkerChannel {
     let ch = channels.get(machine);
     if (ch) return ch;
-    ch = workers.channel(machine);
+    ch = host.channel(machine);
     ch.onMessage((raw: any) => {
       const msg = raw as WorkerMsg;
       if (msg.kind === 'inspect.res') {
@@ -392,14 +408,15 @@ export function register(hostProvider: HostProvider): void {
   void ready.then(() => console.log(`[hello-world] host ready (${greeting()})`));
 
   // Tear down the one thing the host can't track for us: settle any in-flight
-  // worker requests so their promises don't dangle past a reload. (Bus
-  // responders and the schedule are auto-cleaned.)
-  h.deregister({ teardown: () => {
+  // worker requests so their promises don't dangle past a reload. This is the
+  // daemon's `dispose` — the single unload hook, returned from mount (bus
+  // responders and the schedule are auto-cleaned).
+  return { dispose: () => {
     for (const [cid, resolve] of Array.from(pending.entries())) {
       pending.delete(cid);
       // Resolve with an empty listing rather than leak a hanging promise.
       resolve({ hostname: '', platform: '', cwd: '', entries: [] });
     }
     channels.clear();
-  } });
+  } };
 }
