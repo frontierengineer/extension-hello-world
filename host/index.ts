@@ -52,7 +52,7 @@ import type {
   HostDaemonContext,
   Store,
   Scheduler,
-  WorkerChannel,
+  HostWorkerBus,
   ToolResult,
   ToolContext,
 } from '../../types';
@@ -344,9 +344,9 @@ function mount(context: HostDaemonContext): { dispose?: () => void } {
 
   // One channel per machine, created on first use, each with its onMessage
   // wired exactly once. A channel is a cheap handle over live connection state.
-  const channels = new Map<string, WorkerChannel>();
+  const channels = new Map<string, HostWorkerBus>();
 
-  function channelFor(machine: string): WorkerChannel {
+  function channelFor(machine: string): HostWorkerBus {
     let ch = channels.get(machine);
     if (ch) return ch;
     ch = context.channel(machine);

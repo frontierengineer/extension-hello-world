@@ -49,7 +49,7 @@ Hello World is the reference extension — the smallest complete example to copy
 "realms": {
   "surface": { "applications": ["hello-world"], "sidebars": [], "daemon": true },
   "host":    { "mcpTools": ["bump"], "voice": false },
-  "worker":  { "runtime": false, "workspaceProviders": [], "components": true }
+  "worker":  { "runtime": false, "workspaces": [], "components": true }
 }
 ```
 

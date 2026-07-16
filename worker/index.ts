@@ -8,7 +8,7 @@
 //  the host. Like the surface and host realms, register() is declaration-only.
 //  The worker realm takes THREE kinds of top-level component, mirroring the
 //  surface realm's application/sidebar/daemon: an agent RUNTIME
-//  (w.runtime.register), WORKSPACE providers (w.workspace.register), and the
+//  (w.runtime.register), WORKSPACE kinds (w.workspace.register), and the
 //  general-purpose DAEMON (w.daemon.register). Hello World contributes only a
 //  daemon; each component's mount() receives its own flat context
 //  (WorkerDaemonContext here) and its logic lives inside.
@@ -40,7 +40,7 @@ const MAX_ENTRIES = 20;      // cap the directory listing we send back
 export function register(provider: WorkerProvider): void {
   const w = provider.version(1);
   // register() is declaration-only: it names the one component this worker
-  // bundle contributes (a daemon; a runtime or a workspace provider would be
+  // bundle contributes (a daemon; a runtime or a workspace kind would be
   // registered here at the top level the same way). Everything below lives
   // inside the daemon's mount().
   w.daemon.register({ mount });
