@@ -18,7 +18,7 @@
 //
 //  THE AUTHORING MODEL. register() is DECLARATION ONLY — it names the components
 //  this extension contributes and nothing else. There is no logic in register():
-//    • surface.application.register — the ONE app; mount(host) renders the whole view
+//    • surface.application.register — the ONE app; mount(context) renders the whole view
 //    • surface.daemon.register      — the headless, always-on component that is the
 //                                     HOME for background logic and for every
 //                                     registration whose closure must outlive any
@@ -26,10 +26,10 @@
 //                                     status-bar items)
 //
 //  Everything a component does at runtime comes from its MOUNT CONTEXT, never from
-//  register(). The daemon's mount(ctx) is where the logic lives; the app's
-//  mount(host) is where the view renders. Both contexts ARE a SurfaceComponentContext:
+//  register(). The daemon's mount(context) is where the logic lives; the app's
+//  mount(context) is where the view renders. Both contexts ARE a SurfaceContext:
 //  the bus, localSettings, modals, navigate, and the sidebar and overlay controls are
-//  reached FLAT on the context (host.bus, ctx.store, host.modals — no `.services.` hop).
+//  reached FLAT on the context (context.bus, context.store, context.modals — no `.services.` hop).
 //
 //  ACTIONS, NOT COMMANDS. There is no separate "command" concept: every operation is
 //  an ACTION, and every action automatically appears in the command palette. An action
@@ -39,21 +39,21 @@
 //  schedulable unit — so an action's input schema must always be modal-renderable.
 //
 //  It demonstrates, each clearly separated:
-//    • surface.application.register — the ONE app; mount(host) renders the whole view
-//    • ctx.actions.register (input: null) — (in the daemon) a ZERO-ARGUMENT action: a
+//    • surface.application.register — the ONE app; mount(context) renders the whole view
+//    • context.actions.register (input: null) — (in the daemon) a ZERO-ARGUMENT action: a
 //                                     command-palette entry with a default keybinding,
 //                                     the successor to the old command
-//    • ctx.actions.register (input schema) — (in the daemon) a typed, agent-callable
+//    • context.actions.register (input schema) — (in the daemon) a typed, agent-callable
 //                                     ACTION with a live picker field, rendered as a
 //                                     modal by the host and bound to an in-app
 //                                     <ActionButton> (one declaration → human modal +
 //                                     agent tool + scheduler; see register())
 //    • <ActionButton>          — bind a button to an action: it runs the action AND
 //                                drives the Info View from its docs, no glue code
-//    • host.bus.extension.*    — calling its own server + rendering live events
-//    • host.workers            — reading the substrate (connected machines)
-//    • host.lifecycle          — committing side effects only when activated
-//    • host.modals.prompt      — a host-rendered modal to collect ad-hoc input
+//    • context.bus.extension.*    — calling its own server + rendering live events
+//    • context.workers            — reading the substrate (connected machines)
+//    • context.lifecycle          — committing side effects only when activated
+//    • context.modals.prompt      — a host-rendered modal to collect ad-hoc input
 //    • data-help / data-help-title — hover annotations that feed the Info View
 //
 //  `../../types` is type-only (erased from the bundle); `react` resolves to the
@@ -73,7 +73,7 @@ import { createRoot } from 'react-dom/client';
 // won't tree-shake those out, so importing ActionButton from the root would bloat
 // this minimal app by ~megabytes. The subpath pulls only the action machinery.
 import { ActionButton } from '@frontierengineer/ui/useAction';
-import type { SurfaceProvider, ViewHost, Bus } from '../../types';
+import type { SurfaceProvider, SurfaceViewContext, Bus } from '../../types';
 import type { HelloState } from '../messages'; // our own root file (one level up); the host contract is '../../types' (two)
 
 // The app's launcher glyph: an SVG path `d` drawn in a `0 0 16 16` viewBox and
@@ -126,30 +126,30 @@ function useGreeting(bus: Bus): string | null {
   return greeting;
 }
 
-// ── The whole app: one full view, rendered into host.container ──────────────
+// ── The whole app: one full view, rendered into context.container ──────────────
 // Reads live state, bumps the counter via the server, edits the note via a host
 // modal, and renders the worker heartbeats the server fans out to us. The app
 // owns its entire rect — here a single scrollable page.
-function HelloApp({ host }: { host: ViewHost }) {
-  const state = useHelloState(host.bus);
-  const greeting = useGreeting(host.bus);
+function HelloApp({ context }: { context: SurfaceViewContext }) {
+  const state = useHelloState(context.bus);
+  const greeting = useGreeting(context.bus);
   const [heartbeats, setHeartbeats] = useState<Array<{ machine: string; hostname: string; at: string }>>([]);
 
   // EVENTS: render the live worker→server→bus→UI fan-out. Each heartbeat began
   // on a daemon, went to the server, and the server re-published it to us.
   useEffect(() => {
-    const sub = host.bus.extension.subscribe('worker.heartbeat', (hb: any) => {
+    const sub = context.bus.extension.subscribe('worker.heartbeat', (hb: any) => {
       setHeartbeats((prev) => [hb, ...prev].slice(0, 5));
     });
     return () => sub.unsubscribe();
-  }, [host]);
+  }, [context]);
 
-  const bump = useCallback(() => { void host.bus.extension.request('state.bump', { by: 1 }); }, [host]);
+  const bump = useCallback(() => { void context.bus.extension.request('state.bump', { by: 1 }); }, [context]);
 
   // Editing the NOTE is handled by the "hello-world.set_note" ACTION, surfaced via
   // the <ActionButton> in the Note section below — so the same operation is a human
   // modal, an agent tool (frontier.run_action), and a schedulable unit from ONE
-  // declaration (see register()). Contrast it with the ad-hoc host.modals.prompt used
+  // declaration (see register()). Contrast it with the ad-hoc context.modals.prompt used
   // for the greeting just below: reach for an action when an operation is worth
   // exposing (agent-callable, repeatable); reach for modals.prompt for a quick,
   // surface-local input that isn't a first-class operation.
@@ -159,14 +159,14 @@ function HelloApp({ host }: { host: ViewHost }) {
   // the server's greeting.set (which persists to the Store); the tile updates
   // live off the greeting.changed event the server publishes.
   const editGreeting = useCallback(async () => {
-    const result = await host.modals.prompt({
+    const result = await context.modals.prompt({
       title: 'Edit greeting',
       description: 'A per-extension setting, saved on the server in its durable Store.',
       fields: [{ key: 'greeting', label: 'Greeting', type: 'string', placeholder: null, options: null, required: null, default: greeting ?? '', help: null }],
       submitLabel: 'Save',
     });
-    if (result) void host.bus.extension.request('greeting.set', { greeting: result.greeting });
-  }, [host, greeting]);
+    if (result) void context.bus.extension.request('greeting.set', { greeting: result.greeting });
+  }, [context, greeting]);
 
   return (
     <div style={{ padding: 24, lineHeight: 1.5, fontSize: 14, maxWidth: 640 }}>
@@ -220,7 +220,7 @@ function HelloApp({ host }: { host: ViewHost }) {
         <ActionButton actionId="hello-world.set_note" style={{ marginLeft: 8 }}>Set note…</ActionButton>
       </section>
 
-      <WorkerInspector host={host} />
+      <WorkerInspector context={context} />
 
       <section style={{ margin: '16px 0' }}>
         <strong>Live worker heartbeats</strong> (pushed daemon → server → bus → here):
@@ -242,24 +242,24 @@ function HelloApp({ host }: { host: ViewHost }) {
 // Calls the server's `worker.inspect`, which forwards to the worker component
 // and awaits the correlated reply — surfacing data only code beside the
 // machine's files could produce (hostname, cwd, a directory listing).
-function WorkerInspector({ host }: { host: ViewHost }) {
+function WorkerInspector({ context }: { context: SurfaceViewContext }) {
   const [machine, setMachine] = useState('');
   const [result, setResult] = useState<string>('');
 
   // List connected machines via the host substrate so the user can pick one.
-  const machines = host.workers.list().filter((m) => m.connected);
+  const machines = context.workers.list().filter((m) => m.connected);
 
   const inspect = useCallback(async () => {
     const target = machine || machines[0]?.id;
     if (!target) { setResult('no connected machine'); return; }
     setResult('inspecting…');
     try {
-      const reply = await host.bus.extension.request('worker.inspect', { machine: target });
+      const reply = await context.bus.extension.request('worker.inspect', { machine: target });
       setResult(JSON.stringify(reply, null, 2));
     } catch (err: any) {
       setResult(`error: ${err?.message || err}`);
     }
-  }, [host, machine, machines]);
+  }, [context, machine, machines]);
 
   return (
     <section style={{ margin: '16px 0' }}>
@@ -293,12 +293,12 @@ export function register(surfaceProvider: SurfaceProvider): void {
   // headless and always running while the extension is enabled, so it is the right
   // home for the actions — registrations whose closures must outlive any visible
   // surface (a palette invocation or an agent call reaches them with no app open).
-  // mount(ctx) gives it the same runtime substrate a visible component gets: the
-  // context IS a SurfaceComponentContext (ctx.bus to talk to the server, plus
-  // ctx.localSettings, ctx.modals, and the ctx.workers/ctx.workspaces substrate),
-  // plus the registration surfaces (ctx.actions, ctx.optionSources, ctx.statusBar).
+  // mount(context) gives it the same runtime substrate a visible component gets: the
+  // context IS a SurfaceContext (context.bus to talk to the server, plus
+  // context.localSettings, context.modals, and the context.workers/context.workspaces substrate),
+  // plus the registration surfaces (context.actions, context.optionSources, context.statusBar).
   surface.daemon.register({
-    mount(ctx) {
+    mount(context) {
       // ── A ZERO-ARGUMENT ACTION: the successor to a command ────────────────
       // There are no "commands" anymore — every operation is an action, and every
       // action appears in the command palette (Cmd/Ctrl+Shift+P). An action with
@@ -306,12 +306,12 @@ export function register(surfaceProvider: SurfaceProvider): void {
       // with no generated modal, and it still carries the palette fields a command
       // had (category groups it; defaultKey seeds a keybinding). It runs in the
       // daemon — a separate component from the app's mount — so it can't reach the
-      // app's React state or host.openExtension; it acts through the context. Here
+      // app's React state or context.openExtension; it acts through the context. Here
       // it edits the note via its own host prompt and sends it to the server over
       // the bus; the open app re-renders from the server's `state.changed` event.
       // Because every action is also agent-callable, write its `description` FOR the
       // model even when it takes no arguments.
-      ctx.actions.register({
+      context.actions.register({
         id: 'hello-world.edit-note',
         title: 'Hello World: Edit note',
         description:
@@ -327,20 +327,20 @@ export function register(surfaceProvider: SurfaceProvider): void {
         input: null,
         output: null,
         run: async () => {
-          const result = await ctx.modals.prompt({
+          const result = await context.modals.prompt({
             title: 'Edit note',
             description: 'Stored in the extension\'s durable Store on the server.',
             fields: [{ key: 'note', label: 'Note', type: 'string', placeholder: null, options: null, required: null, default: null, help: null }],
             submitLabel: 'Save',
           });
-          if (result) void ctx.bus.extension.request('note.set', { note: result.note });
+          if (result) void context.bus.extension.request('note.set', { note: result.note });
         },
       });
 
       // ── ACTION: a typed, agent-callable operation the host renders a modal for
       //
       // THE pattern to copy when an operation is worth making first-class. ONE
-      // ctx.actions.register declaration yields THREE things with no extra code:
+      // context.actions.register declaration yields THREE things with no extra code:
       //   1. a human modal — the host generates it from `input` (the <ActionButton> in
       //      the app triggers it; so does the command palette and a host CTA),
       //   2. an agent tool — frontier.run_action "hello-world.set_note" runs the SAME
@@ -359,7 +359,7 @@ export function register(surfaceProvider: SurfaceProvider): void {
       // highlights that field inline and keeps itself open — try submitting an empty
       // note), and success returns a value the <ActionButton>'s onResult / an agent
       // can read.
-      ctx.actions.register({
+      context.actions.register({
         id: 'hello-world.set_note',
         title: 'Set the note',
         description:
@@ -390,7 +390,7 @@ export function register(surfaceProvider: SurfaceProvider): void {
           // the demo SHOWS the id the picker produced.
           const workspaceId = args.workspace ? String(args.workspace) : '';
           const text = workspaceId ? `${note} [re: ${workspaceId}]` : note;
-          await ctx.bus.extension.request('note.set', { note: text });
+          await context.bus.extension.request('note.set', { note: text });
           return { note: text };
         },
       });
@@ -403,9 +403,9 @@ export function register(surfaceProvider: SurfaceProvider): void {
 
   // ── THE APP: one registration that owns the whole content rect ────────────
   // metadata ({id,title,icon,color}) is declared to the host immediately so the
-  // launcher can draw the icon before the app is ever opened. mount(host) runs
+  // launcher can draw the icon before the app is ever opened. mount(context) runs
   // ONCE, the first time the host warms this app's webview; it renders the whole
-  // UI into host.container and returns a teardown handle ({ dispose?: () => void } —
+  // UI into context.container and returns a teardown handle ({ dispose?: () => void } —
   // always an object, never null/void; `dispose` is optional, and {} means nothing
   // to tear down) the host runs if the user quits the app from the launcher.
   let root: ReturnType<typeof createRoot> | null = null;
@@ -415,9 +415,9 @@ export function register(surfaceProvider: SurfaceProvider): void {
     icon: HELLO_ICON,
     color: '#14b8a6',
     requires: null,
-    mount(host: ViewHost) {
-      root = createRoot(host.container);
-      root.render(<HelloApp host={host} />);
+    mount(context: SurfaceViewContext) {
+      root = createRoot(context.container);
+      root.render(<HelloApp context={context} />);
       return { dispose: () => { root?.unmount(); root = null; } };
     },
   });

@@ -7,7 +7,7 @@
 //  (over the bus) and the worker component (over the worker channel) — so it
 //  sits in the middle and everything routes through it:
 //
-//        surface/index.tsx  ──bus.extension──►  host/index.ts  ──host.channel──►  worker/index.ts
+//        surface/index.tsx  ──bus.extension──►  host/index.ts  ──channel(machine)──►  worker/index.ts
 //        (the browser)  ◄────────────────     (THIS FILE)     ◄──────────────────   (the daemon)
 //
 //  An extension is up to three bundles, one directory each — surface/ (browser),
@@ -24,8 +24,8 @@
 //    §5  Private bus    — request/respond + publish for THIS extension's UI
 //    §6  Public bus     — one versioned endpoint OTHER extensions can call
 //    §7  MCP            — a tool the agent can call (host realm, shared memory)
-//    §8  Worker channel — request/response correlation to the worker component,
-//                         plus fanning the worker's pushes out to every UI
+//    §8  Worker channel — ask the worker component (platform-correlated
+//                         request/response), plus fanning its pushes out to every UI
 //
 //  The contract type comes from the host. `../../types` resolves to the vendored
 //  contract at the repo root here, and to the host-written shim in production —
@@ -34,11 +34,11 @@
 //  register() receives a PROVIDER; call version(1) for the v1 realm shape.
 //  register() is DECLARATION-ONLY: it names the single daemon this bundle runs
 //  and nothing more. All logic and all capability live inside that daemon's
-//  mount(), which the host calls with the flat HostDaemonHost when the daemon
+//  mount(), which the host calls with the flat HostDaemonContext when the daemon
 //  comes up. Everything registered inside mount is auto-tracked and torn down on
-//  reload; mount RETURNS the one teardown the host can't see for itself (here:
-//  settling the in-flight worker requests) as its `dispose` — the single unload
-//  hook, the same shape all three realms use.
+//  reload; mount RETURNS anything the host can't tear down for itself as its
+//  `dispose` — the single unload hook, the same shape all three realms use
+//  (this daemon has nothing of the sort, so it returns an empty handle).
 
 // Two different import depths, and the difference matters:
 //   • `../../types`   — the HOST contract. Two levels up because in production
@@ -49,14 +49,14 @@
 //     up from a realm dir. It is not a host file; it ships with us.
 import type {
   HostProvider,
-  HostDaemonHost,
+  HostDaemonContext,
   Store,
   Scheduler,
   WorkerChannel,
   ToolResult,
   ToolContext,
 } from '../../types';
-import type { HelloState, WorkerMsg, WorkerInspectReply } from '../messages';
+import type { HelloState, WorkerPush, WorkerRequest, WorkerInspectReply } from '../messages';
 
 // ── Store key + defaults ───────────────────────────────────────────────────
 // One key holds the whole state blob as JSON, read and written through the
@@ -124,15 +124,17 @@ export function register(hostProvider: HostProvider): void {
   h.daemon.register({ mount });
 }
 
-// The hello-world host daemon. Its mount() receives the flat HostDaemonHost —
+// The hello-world host daemon. Its mount() receives the flat HostDaemonContext —
 // every capability sits directly on it: `bus` is this extension's bus,
 // `channel(machine)` reaches its worker component, `store`/`scheduler` are the
-// backing capabilities, and `mcp` registers tools the agent can call (§7). mount
-// returns the extension's one teardown as `dispose`.
-function mount(host: HostDaemonHost): { dispose?: () => void } {
-  const { bus } = host;
-  const store: Store = host.store;
-  const scheduler: Scheduler = host.scheduler;
+// backing capabilities, and `mcp` registers tools the agent can call (§7). This
+// daemon has nothing the platform cannot tear down for itself, so its mount
+// returns an empty handle (contrast worker/index.ts, whose daemon returns a
+// real dispose for its interval).
+function mount(context: HostDaemonContext): { dispose?: () => void } {
+  const { bus } = context;
+  const store: Store = context.store;
+  const scheduler: Scheduler = context.scheduler;
 
   // ─────────────────────────────────────────────────────────────────────────
   //  §1  STORE — durable, per-extension key/value state
@@ -284,7 +286,7 @@ function mount(host: HostDaemonHost): { dispose?: () => void } {
   // ─────────────────────────────────────────────────────────────────────────
   //  §7  MCP — a tool the AGENT can call (same realm as the rest of host/)
   // ─────────────────────────────────────────────────────────────────────────
-  //  REALM: host. `host.mcp.registerTool` contributes a tool to EVERY agent turn
+  //  REALM: host. `context.mcp.registerTool` contributes a tool to EVERY agent turn
   //  across all sessions; the host namespaces it by extension id, so the agent
   //  sees this one as `hello-world.bump`. MCP is not its own bundle — it lives
   //  in host/, the same realm (and the same module instance) as the bus
@@ -300,7 +302,7 @@ function mount(host: HostDaemonHost): { dispose?: () => void } {
   // normal result; return `isError: true` for a failure the agent should reason
   // about.
   const text = (t: string): ToolResult => ({ content: [{ type: 'text', text: t }], isError: null });
-  host.mcp.registerTool({
+  context.mcp.registerTool({
     name: 'bump',
     title: 'Bump the Hello World counter',
     description:
@@ -327,39 +329,30 @@ function mount(host: HostDaemonHost): { dispose?: () => void } {
   // ─────────────────────────────────────────────────────────────────────────
   //  §8  WORKER CHANNEL — the headline: talk to the daemon-side component
   // ─────────────────────────────────────────────────────────────────────────
-  //  REALM: host ⇄ worker. `host.channel(machine)` is a raw, machine-scoped
-  //  link to THIS extension's worker component on a connected machine. The
-  //  platform guarantees only ordered delivery of opaque JSON — NO request/
-  //  response correlation. So we build our own: tag each request with a
-  //  correlation id (`cid`), park a promise keyed by that cid, and resolve it
-  //  when a reply carrying the same cid arrives. (This is the tiny correlation
-  //  helper the brief asks for — the platform channel is send/onMessage only.)
+  //  REALM: host ⇄ worker. `context.channel(machine)` is a machine-scoped link
+  //  to THIS extension's worker component on a connected machine, carrying
+  //  ordered, opaque JSON. It speaks two dialects:
+  //    • request() — ask the worker and await its answer. The PLATFORM owns the
+  //      correlation and the timeout (the worker answers via channel.onRequest),
+  //      so neither side mints request ids or matches replies by hand.
+  //    • send()/onMessage() — fire-and-forget, for streams and pushes.
   //
-  //  We also wire the OTHER direction: the worker PUSHES an unsolicited
-  //  `heartbeat`, and we re-publish it on the bus so EVERY UI sees it. That is
-  //  the worker→host→bus→all-UIs fan-out — a worker has no path to the UI of
-  //  its own; it reaches the user by going through its host bundle. THIS is that.
+  //  We use both. The inspect round-trip is a request; and the worker PUSHES an
+  //  unsolicited `heartbeat`, which we re-publish on the bus so EVERY UI sees
+  //  it. That is the worker→host→bus→all-UIs fan-out — a worker has no path to
+  //  the UI of its own; it reaches the user by going through its host bundle.
 
   // One channel per machine, created on first use, each with its onMessage
   // wired exactly once. A channel is a cheap handle over live connection state.
   const channels = new Map<string, WorkerChannel>();
-  // cid → resolver for an in-flight inspect request awaiting its reply.
-  const pending = new Map<string, (reply: WorkerInspectReply) => void>();
 
   function channelFor(machine: string): WorkerChannel {
     let ch = channels.get(machine);
     if (ch) return ch;
-    ch = host.channel(machine);
+    ch = context.channel(machine);
     ch.onMessage((raw: any) => {
-      const msg = raw as WorkerMsg;
-      if (msg.kind === 'inspect.res') {
-        // Match the reply to the request that's awaiting it, then settle it.
-        const resolve = pending.get(msg.cid);
-        if (resolve) {
-          pending.delete(msg.cid);
-          resolve(msg.reply);
-        }
-      } else if (msg.kind === 'heartbeat') {
+      const msg = raw as WorkerPush;
+      if (msg.kind === 'heartbeat') {
         // FAN-OUT: a push from the daemon, re-published to every connected UI.
         bus.extension.publish('worker.heartbeat', {
           machine,
@@ -372,51 +365,24 @@ function mount(host: HostDaemonHost): { dispose?: () => void } {
     return ch;
   }
 
-  // The correlation helper: send an inspect request and await the matching
-  // reply (or time out so a dropped machine never hangs the UI forever).
-  function inspectWorker(machine: string, timeoutMs = 5_000): Promise<WorkerInspectReply> {
-    const ch = channelFor(machine);
-    const cid = `c_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-    return new Promise<WorkerInspectReply>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        pending.delete(cid);
-        reject(new Error(`worker ${machine} did not reply within ${timeoutMs}ms`));
-      }, timeoutMs);
-      pending.set(cid, (reply) => {
-        clearTimeout(timer);
-        resolve(reply);
-      });
-      const req: WorkerMsg = { kind: 'inspect.req', cid };
-      try {
-        ch.send(req); // throws synchronously if the machine is disconnected
-      } catch (err: any) {
-        clearTimeout(timer);
-        pending.delete(cid);
-        reject(err);
-      }
-    });
-  }
-
   // Expose the round-trip to the UI as a normal private request (§5 surface):
   // the UI asks the host bundle, which asks the worker, the answer flows back.
+  // request() rejects on a transport fault (machine disconnected, timeout), and
+  // that rejection surfaces to the UI's own awaiting promise — no hand-rolled
+  // timer here.
   bus.extension.respond('worker.inspect', async (params: { machine: string }) => {
     const machine = typeof params?.machine === 'string' ? params.machine : '';
     if (!machine) throw new Error('worker.inspect: machine required');
-    return inspectWorker(machine);
+    const request: WorkerRequest = { kind: 'inspect' };
+    return channelFor(machine).request<WorkerRequest, WorkerInspectReply>(request);
   });
 
   void ready.then(() => console.log(`[hello-world] host ready (${greeting()})`));
 
-  // Tear down the one thing the host can't track for us: settle any in-flight
-  // worker requests so their promises don't dangle past a reload. This is the
-  // daemon's `dispose` — the single unload hook, returned from mount (bus
-  // responders and the schedule are auto-cleaned).
-  return { dispose: () => {
-    for (const [cid, resolve] of Array.from(pending.entries())) {
-      pending.delete(cid);
-      // Resolve with an empty listing rather than leak a hanging promise.
-      resolve({ hostname: '', platform: '', cwd: '', entries: [] });
-    }
-    channels.clear();
-  } };
+  // Nothing to tear down by hand: the bus responders, the schedule, the MCP
+  // tool, and the channel's in-flight requests are all platform-tracked and
+  // settled on unload. `dispose` is optional, so this mount returns an empty
+  // handle — contrast the worker daemon, whose interval the platform cannot see
+  // and which therefore returns a real dispose.
+  return {};
 }

@@ -14,7 +14,7 @@
 //
 // (The worker↔server channel is a different transport — a raw JSON link, not
 // the bus — so its protocol lives in its own section of server/worker code,
-// not here. See WorkerMsg at the bottom for that shape.)
+// not here. See WorkerRequest/WorkerPush at the bottom for those shapes.)
 // ─────────────────────────────────────────────────────────────────────────
 
 // The single piece of durable state this extension keeps: a counter the user
@@ -44,12 +44,12 @@ export interface Requests {
   // reads and writes it through these two requests rather than declaring a
   // host-rendered schema.
   'greeting.get': { params: Record<string, never>; response: { greeting: string } };
-  // Replace the greeting and persist it via config.set; returns the new value.
+  // Replace the greeting and persist it to the Store; returns the new value.
   'greeting.set': { params: { greeting: string }; response: { greeting: string } };
-  // Ask the server to round-trip the worker channel: server sends a request to
-  // its worker component on `machine`, the component answers from next to the
-  // files, and the server returns that reply. Demonstrates request/response
-  // CORRELATION layered over the raw channel.
+  // Ask the host bundle to round-trip the worker channel: it calls
+  // channel(machine).request(), the worker component answers from next to the
+  // files via channel.onRequest, and the reply flows back. The platform owns
+  // the correlation and the timeout end to end.
   'worker.inspect': { params: { machine: string }; response: WorkerInspectReply };
 }
 
@@ -93,17 +93,20 @@ export interface PublicApi {
   'count.get': { version: 1; params: Record<string, never>; response: { count: number } };
 }
 
-// ── Worker channel protocol (server ⇄ worker, NOT the bus) ─────────────────
+// ── Worker channel protocol (host bundle ⇄ worker, NOT the bus) ────────────
 //
-// The worker channel carries opaque JSON; this is OUR envelope over it. Every
-// message has a `kind`; requests/replies carry a `cid` (correlation id) so the
-// server can match a reply to the request it sent (the platform channel has no
-// built-in correlation — we add it). `heartbeat` is unsolicited: the worker
-// pushes it on its own, with no request to answer.
-export type WorkerMsg =
-  // server → worker: please inspect the machine; answer with cid.
-  | { kind: 'inspect.req'; cid: string }
-  // worker → server: the answer to inspect.req with the matching cid.
-  | { kind: 'inspect.res'; cid: string; reply: WorkerInspectReply }
-  // worker → server: an unsolicited push (no cid) the server fans out to UIs.
-  | { kind: 'heartbeat'; hostname: string; at: string };
+// The worker channel carries opaque JSON; these are OUR payloads over it. The
+// link speaks two dialects, and the split here mirrors them:
+//   • WorkerRequest rides `channel(machine).request()` and is answered by the
+//     worker's `channel.onRequest` handler — the PLATFORM owns the correlation
+//     and the timeout, so no request id appears in the payload.
+//   • WorkerPush rides plain `send()` — unsolicited, fire-and-forget; the host
+//     bundle fans it out to UIs.
+// Branch on `kind` to grow either side of the protocol.
+export type WorkerRequest =
+  // host bundle → worker: please inspect the machine; the reply is the
+  // handler's return value (a WorkerInspectReply).
+  { kind: 'inspect' };
+export type WorkerPush =
+  // worker → host bundle: an unsolicited push the host bundle fans out to UIs.
+  { kind: 'heartbeat'; hostname: string; at: string };
