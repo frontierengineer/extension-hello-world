@@ -73,8 +73,8 @@ import { createRoot } from 'react-dom/client';
 // won't tree-shake those out, so importing ActionButton from the root would bloat
 // this minimal app by ~megabytes. The subpath pulls only the action machinery.
 import { ActionButton } from '@frontierengineer/ui/useAction';
-import type { SurfaceProvider, SurfaceViewContext, Bus } from '../../types';
-import type { HelloState } from '../messages'; // our own root file (one level up); the host contract is '../../types' (two)
+import type { SurfaceProvider, SurfaceApplicationContext, Bus } from '../../types';
+import type { HelloState, WorkerPush, WorkerRequest, WorkerInspectReply } from '../messages'; // our own root file (one level up); the host contract is '../../types' (two)
 
 // The app's launcher glyph: an SVG path `d` drawn in a `0 0 16 16` viewBox and
 // stroked in currentColor (the host tints it with the app's color). A globe —
@@ -128,18 +128,22 @@ function useGreeting(bus: Bus): string | null {
 
 // ── The whole app: one full view, rendered into context.container ──────────────
 // Reads live state, bumps the counter via the server, edits the note via a host
-// modal, and renders the worker heartbeats the server fans out to us. The app
-// owns its entire rect — here a single scrollable page.
-function HelloApp({ context }: { context: SurfaceViewContext }) {
+// modal, and renders the worker heartbeats pushed straight over the platform
+// channel. The app owns its entire rect — here a single scrollable page.
+function HelloApp({ context }: { context: SurfaceApplicationContext }) {
   const state = useHelloState(context.bus);
   const greeting = useGreeting(context.bus);
   const [heartbeats, setHeartbeats] = useState<Array<{ machine: string; hostname: string; at: string }>>([]);
 
-  // EVENTS: render the live worker→server→bus→UI fan-out. Each heartbeat began
-  // on a daemon, went to the server, and the server re-published it to us.
+  // EVENTS: render the worker daemons' live pushes. The channel is a PLATFORM
+  // service, so the daemon's send() lands here directly — no host-bundle relay,
+  // no re-publish. The envelope names the machine the push came from (the
+  // payload never has to carry routing facts itself).
   useEffect(() => {
-    const sub = context.bus.extension.subscribe('worker.heartbeat', (hb: any) => {
-      setHeartbeats((prev) => [hb, ...prev].slice(0, 5));
+    const sub = context.channel.onMessage((raw, envelope) => {
+      const msg = raw as WorkerPush;
+      if (msg.kind !== 'heartbeat') return;
+      setHeartbeats((prev) => [{ machine: envelope.machine, hostname: msg.hostname, at: msg.at }, ...prev].slice(0, 5));
     });
     return () => sub.unsubscribe();
   }, [context]);
@@ -223,7 +227,7 @@ function HelloApp({ context }: { context: SurfaceViewContext }) {
       <WorkerInspector context={context} />
 
       <section style={{ margin: '16px 0' }}>
-        <strong>Live worker heartbeats</strong> (pushed daemon → server → bus → here):
+        <strong>Live worker heartbeats</strong> (pushed by each daemon straight over the channel):
         {heartbeats.length === 0 ? (
           <p style={{ opacity: 0.6, margin: '4px 0' }}>none yet — connect a machine</p>
         ) : (
@@ -239,10 +243,13 @@ function HelloApp({ context }: { context: SurfaceViewContext }) {
 }
 
 // ── The worker round-trip, on demand ───────────────────────────────────────
-// Calls the server's `worker.inspect`, which forwards to the worker component
-// and awaits the correlated reply — surfacing data only code beside the
+// Asks the worker daemon DIRECTLY over the platform channel — no host-bundle
+// hop. The `{ machine }` target routes the request to that machine's daemon
+// (a slot-scoped call would target `{ reservationId }` instead, and the
+// daemon would read the reservation off its envelope); the platform owns the
+// correlation and the timeout. The reply is data only code beside the
 // machine's files could produce (hostname, cwd, a directory listing).
-function WorkerInspector({ context }: { context: SurfaceViewContext }) {
+function WorkerInspector({ context }: { context: SurfaceApplicationContext }) {
   const [machine, setMachine] = useState('');
   const [result, setResult] = useState<string>('');
 
@@ -254,7 +261,8 @@ function WorkerInspector({ context }: { context: SurfaceViewContext }) {
     if (!target) { setResult('no connected machine'); return; }
     setResult('inspecting…');
     try {
-      const reply = await context.bus.extension.request('worker.inspect', { machine: target });
+      const request: WorkerRequest = { kind: 'inspect' };
+      const reply = await context.channel.request<WorkerRequest, WorkerInspectReply>({ machine: target }, request);
       setResult(JSON.stringify(reply, null, 2));
     } catch (err: any) {
       setResult(`error: ${err?.message || err}`);
@@ -263,7 +271,7 @@ function WorkerInspector({ context }: { context: SurfaceViewContext }) {
 
   return (
     <section style={{ margin: '16px 0' }}>
-      <strong>Worker inspect</strong> (server ⇄ worker channel, correlated reply):
+      <strong>Worker inspect</strong> (surface ⇄ worker over the platform channel, correlated reply):
       <div style={{ margin: '4px 0' }}>
         <select
           value={machine}
@@ -276,7 +284,7 @@ function WorkerInspector({ context }: { context: SurfaceViewContext }) {
         </select>{' '}
         <button
           onClick={() => { void inspect(); }}
-          data-help="Ask the chosen machine's worker to report its hostname, working directory and a short file listing — proving the server ⇄ worker round-trip with a correlated reply."
+          data-help="Ask the chosen machine's worker to report its hostname, working directory and a short file listing — proving the surface ⇄ worker round-trip with a correlated reply."
           data-help-title="Inspect the worker"
         >Inspect</button>
       </div>
@@ -415,7 +423,7 @@ export function register(surfaceProvider: SurfaceProvider): void {
     icon: HELLO_ICON,
     color: '#14b8a6',
     requires: null,
-    mount(context: SurfaceViewContext) {
+    mount(context: SurfaceApplicationContext) {
       root = createRoot(context.container);
       root.render(<HelloApp context={context} />);
       return { dispose: () => { root?.unmount(); root = null; } };

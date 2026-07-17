@@ -46,11 +46,6 @@ export interface Requests {
   'greeting.get': { params: Record<string, never>; response: { greeting: string } };
   // Replace the greeting and persist it to the Store; returns the new value.
   'greeting.set': { params: { greeting: string }; response: { greeting: string } };
-  // Ask the host bundle to round-trip the worker channel: it calls
-  // channel(machine).request(), the worker component answers from next to the
-  // files via channel.onRequest, and the reply flows back. The platform owns
-  // the correlation and the timeout end to end.
-  'worker.inspect': { params: { machine: string }; response: WorkerInspectReply };
 }
 
 // What the worker component reports back about the machine it runs on. The
@@ -76,10 +71,6 @@ export interface Events {
   // surface) reflects the edit live without re-requesting. The server publishes
   // it on every greeting.set.
   'greeting.changed': { greeting: string };
-  // The headline fan-out: the worker PUSHED a heartbeat to the server, and the
-  // server re-published it here so EVERY connected UI sees it. This is the
-  // "a worker reaches the UI by going through its server" path, made visible.
-  'worker.heartbeat': { machine: string; hostname: string; at: string };
 }
 
 // ── Public: this extension's ONE cross-extension endpoint (versioned) ──────
@@ -93,19 +84,24 @@ export interface PublicApi {
   'count.get': { version: 1; params: Record<string, never>; response: { count: number } };
 }
 
-// ── Worker channel protocol (host bundle ⇄ worker, NOT the bus) ────────────
+// ── Worker channel protocol (surface/host ⇄ worker, NOT the bus) ───────────
 //
-// The worker channel carries opaque JSON; these are OUR payloads over it. The
-// link speaks two dialects, and the split here mirrors them:
-//   • WorkerRequest rides `channel(machine).request()` and is answered by the
+// The platform channel carries opaque JSON; these are OUR payloads over it.
+// Any of this extension's surface or host code addresses the worker daemon
+// with a target — `{ machine }` here (machine-scoped inspection), or
+// `{ reservationId }` for slot-scoped work (the daemon reads the reservation
+// off its delivery envelope). The link speaks two dialects, and the split
+// here mirrors them:
+//   • WorkerRequest rides `channel.request(target, …)` and is answered by the
 //     worker's `channel.onRequest` handler — the PLATFORM owns the correlation
 //     and the timeout, so no request id appears in the payload.
-//   • WorkerPush rides plain `send()` — unsolicited, fire-and-forget; the host
-//     bundle fans it out to UIs.
+//   • WorkerPush rides plain `send()` — unsolicited, fire-and-forget; every
+//     channel subscriber (each open UI, the host daemon) receives it with an
+//     envelope naming the sending machine.
 // Branch on `kind` to grow either side of the protocol.
 export type WorkerRequest =
-  // host bundle → worker: please inspect the machine; the reply is the
-  // handler's return value (a WorkerInspectReply).
+  // caller → worker: please inspect the machine; the reply is the handler's
+  // return value (a WorkerInspectReply).
   { kind: 'inspect' };
 export type WorkerPush =
   // worker → host bundle: an unsolicited push the host bundle fans out to UIs.

@@ -3,12 +3,16 @@
 // ═══════════════════════════════════════════════════════════════════════════
 //
 //  REALM: host (the host-process bundle). Runs once, in the HOST process, when
-//  the extension loads. It is the only bundle that can talk to BOTH the UI
-//  (over the bus) and the worker component (over the worker channel) — so it
-//  sits in the middle and everything routes through it:
+//  the extension loads. The UI reaches it over the bus; the worker daemons are
+//  reached over the PLATFORM channel, which surface and host bundles address
+//  directly (by machine or by reservation) — the host is a peer on that
+//  channel, not a relay in the middle:
 //
-//        surface/index.tsx  ──bus.extension──►  host/index.ts  ──channel(machine)──►  worker/index.ts
-//        (the browser)  ◄────────────────     (THIS FILE)     ◄──────────────────   (the daemon)
+//        surface/index.tsx  ──bus.extension──►  host/index.ts
+//        (the browser)  ◄────────────────      (THIS FILE)
+//               │                                   │
+//               └────── context.channel ────────────┴──►  worker/index.ts
+//                    ({ machine } | { reservationId })       (the daemon)
 //
 //  An extension is up to three bundles, one directory each — surface/ (browser),
 //  host/ (this), worker/ (each machine's daemon) — compiled, loaded, and run
@@ -24,8 +28,8 @@
 //    §5  Private bus    — request/respond + publish for THIS extension's UI
 //    §6  Public bus     — one versioned endpoint OTHER extensions can call
 //    §7  MCP            — a tool the agent can call (host realm, shared memory)
-//    §8  Worker channel — ask the worker component (platform-correlated
-//                         request/response), plus fanning its pushes out to every UI
+//    §8  Worker channel — what changed: the channel is a platform service the
+//                         surface addresses directly, so this file no longer relays
 //
 //  The contract type comes from the host. `../../types` resolves to the vendored
 //  contract at the repo root here, and to the host-written shim in production —
@@ -52,11 +56,10 @@ import type {
   HostDaemonContext,
   Store,
   Scheduler,
-  HostWorkerBus,
   ToolResult,
   ToolContext,
 } from '../../types';
-import type { HelloState, WorkerPush, WorkerRequest, WorkerInspectReply } from '../messages';
+import type { HelloState } from '../messages';
 
 // ── Store key + defaults ───────────────────────────────────────────────────
 // One key holds the whole state blob as JSON, read and written through the
@@ -126,7 +129,7 @@ export function register(hostProvider: HostProvider): void {
 
 // The hello-world host daemon. Its mount() receives the flat HostDaemonContext —
 // every capability sits directly on it: `bus` is this extension's bus,
-// `channel(machine)` reaches its worker component, `store`/`scheduler` are the
+// `channel` reaches its worker daemons (by machine or reservation), `store`/`scheduler` are the
 // backing capabilities, and `mcp` registers tools the agent can call (§7). This
 // daemon has nothing the platform cannot tear down for itself, so its mount
 // returns an empty handle (contrast worker/index.ts, whose daemon returns a
@@ -327,55 +330,23 @@ function mount(context: HostDaemonContext): { dispose?: () => void } {
   });
 
   // ─────────────────────────────────────────────────────────────────────────
-  //  §8  WORKER CHANNEL — the headline: talk to the daemon-side component
+  //  §8  WORKER CHANNEL — a platform service, not a host relay
   // ─────────────────────────────────────────────────────────────────────────
-  //  REALM: host ⇄ worker. `context.channel(machine)` is a machine-scoped link
-  //  to THIS extension's worker component on a connected machine, carrying
-  //  ordered, opaque JSON. It speaks two dialects:
-  //    • request() — ask the worker and await its answer. The PLATFORM owns the
-  //      correlation and the timeout (the worker answers via channel.onRequest),
-  //      so neither side mints request ids or matches replies by hand.
-  //    • send()/onMessage() — fire-and-forget, for streams and pushes.
+  //  Earlier revisions of this file sat between the UI and the worker: the UI
+  //  asked the host, the host held a per-machine channel, forwarded the
+  //  request, and re-published the worker's pushes onto the bus. The channel
+  //  is a PLATFORM service now, addressed directly from any realm with a
+  //  target — `{ machine }` for machine-scoped work, `{ reservationId }` for
+  //  slot-scoped work (the platform resolves the reservation to its machine
+  //  and stamps it on the delivery envelope, so the daemon knows which slot a
+  //  call concerns without the payload saying so).
   //
-  //  We use both. The inspect round-trip is a request; and the worker PUSHES an
-  //  unsolicited `heartbeat`, which we re-publish on the bus so EVERY UI sees
-  //  it. That is the worker→host→bus→all-UIs fan-out — a worker has no path to
-  //  the UI of its own; it reaches the user by going through its host bundle.
-
-  // One channel per machine, created on first use, each with its onMessage
-  // wired exactly once. A channel is a cheap handle over live connection state.
-  const channels = new Map<string, HostWorkerBus>();
-
-  function channelFor(machine: string): HostWorkerBus {
-    let ch = channels.get(machine);
-    if (ch) return ch;
-    ch = context.channel(machine);
-    ch.onMessage((raw: any) => {
-      const msg = raw as WorkerPush;
-      if (msg.kind === 'heartbeat') {
-        // FAN-OUT: a push from the daemon, re-published to every connected UI.
-        bus.extension.publish('worker.heartbeat', {
-          machine,
-          hostname: msg.hostname,
-          at: msg.at,
-        });
-      }
-    });
-    channels.set(machine, ch);
-    return ch;
-  }
-
-  // Expose the round-trip to the UI as a normal private request (§5 surface):
-  // the UI asks the host bundle, which asks the worker, the answer flows back.
-  // request() rejects on a transport fault (machine disconnected, timeout), and
-  // that rejection surfaces to the UI's own awaiting promise — no hand-rolled
-  // timer here.
-  bus.extension.respond('worker.inspect', async (params: { machine: string }) => {
-    const machine = typeof params?.machine === 'string' ? params.machine : '';
-    if (!machine) throw new Error('worker.inspect: machine required');
-    const request: WorkerRequest = { kind: 'inspect' };
-    return channelFor(machine).request<WorkerRequest, WorkerInspectReply>(request);
-  });
+  //  So the inspect round-trip and the heartbeat stream both live where they
+  //  belong: surface/index.tsx calls `context.channel.request({ machine },
+  //  { kind: 'inspect' })` and subscribes `context.channel.onMessage` for the
+  //  daemon's pushes. This bundle writes NO relay code — a host daemon holds
+  //  the same `context.channel` and would use it the same way when host-side
+  //  logic (a schedule, an MCP tool) needs the machine's answer.
 
   void ready.then(() => console.log(`[hello-world] host ready (${greeting()})`));
 

@@ -20,7 +20,7 @@
 //  host/index.ts §8). This file shows both halves of that:
 //    • it ANSWERS the host bundle's inspect request (channel.onRequest — the
 //      platform owns the correlation and the timeout), and
-//    • it PUSHES an unsolicited heartbeat the host bundle fans out to every UI
+//    • it PUSHES an unsolicited heartbeat every channel subscriber receives
 //      (channel.send — fire-and-forget, the streaming half of the link).
 //
 //  Node built-ins (fs/os/path) are imported normally — esbuild keeps them
@@ -34,7 +34,7 @@ import * as os from 'os';
 import type { WorkerProvider, WorkerDaemonContext } from '../../types';
 import type { WorkerPush, WorkerRequest, WorkerInspectReply } from '../messages';
 
-const HEARTBEAT_MS = 30_000; // push a heartbeat to the host twice a minute
+const HEARTBEAT_MS = 30_000; // push a heartbeat over the channel twice a minute
 const MAX_ENTRIES = 20;      // cap the directory listing we send back
 
 export function register(provider: WorkerProvider): void {
@@ -74,25 +74,30 @@ function mount(context: WorkerDaemonContext): { dispose?: () => void } {
     };
   }
 
-  // ── Direction 1: ANSWER the host bundle's request ───────────────────────────
-  // The host bundle calls `channel(machine).request({ kind: 'inspect' })`; the
-  // handler registered here returns the answer and the PLATFORM carries it back
-  // to the awaiting promise — the correlation and the timeout are the channel's
-  // job now, so neither side mints request ids or matches replies by hand.
-  // One responder serves the extension on this machine (re-registering
-  // replaces it); branch on the payload's `kind` to grow the protocol.
-  channel.onRequest((raw: unknown) => {
+  // ── Direction 1: ANSWER a caller's request ──────────────────────────────────
+  // A surface (or host daemon) calls `channel.request({ machine }, { kind:
+  // 'inspect' })`; the handler registered here returns the answer and the
+  // PLATFORM carries it back to the awaiting promise — the correlation and the
+  // timeout are the channel's job, so neither side mints request ids or
+  // matches replies by hand. The envelope carries the routing facts: a
+  // slot-scoped call would arrive with `envelope.reservationId` set, which is
+  // how one daemon serves every slot on its machine without the payload
+  // naming them. One responder serves the extension on this machine
+  // (re-registering replaces it); branch on the payload's `kind` to grow the
+  // protocol.
+  channel.onRequest((raw: unknown, _envelope) => {
     const msg = raw as WorkerRequest;
     if (msg.kind === 'inspect') return inspect();
     throw new Error(`hello-world worker: unknown request kind ${(msg as { kind?: string }).kind}`);
   });
 
-  // ── Direction 2: PUSH unsolicited heartbeats the host bundle fans out to UIs ────
-  // Nothing asked for these. The component decides on its own to report it's
-  // alive; the host bundle re-publishes each on the bus so every connected UI sees
-  // it (the worker→host→bus→all-UIs path). Fire-and-forget traffic like this
-  // stays on send()/onMessage(); `channel.send` while the daemon link is down is
-  // dropped with a log, so a brief disconnect is harmless.
+  // ── Direction 2: PUSH unsolicited heartbeats to every channel subscriber ────
+  // Nothing asked for these. The daemon decides on its own to report it's
+  // alive; every subscriber's `channel.onMessage` receives the push with an
+  // envelope naming this machine — no relay, no re-publish. Fire-and-forget
+  // traffic like this stays on send()/onMessage(); `channel.send` while the
+  // daemon link is down is dropped with a log, so a brief disconnect is
+  // harmless.
   function beat(): void {
     const msg: WorkerPush = {
       kind: 'heartbeat',
