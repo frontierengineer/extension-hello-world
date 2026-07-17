@@ -8,18 +8,25 @@
         "hello-world"
       ],
       "sidebars": [],
-      "daemon": true
+      "daemons": [
+        "hello-world"
+      ]
     },
     "host": {
       "mcpTools": [
         "bump"
       ],
-      "voice": false
+      "voice": false,
+      "daemons": [
+        "hello-world"
+      ]
     },
     "worker": {
       "runtimes": [],
       "workspaces": [],
-      "daemon": true
+      "daemons": [
+        "hello-world"
+      ]
     }
   }
 }

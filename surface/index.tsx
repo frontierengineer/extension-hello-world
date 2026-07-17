@@ -19,11 +19,11 @@
 //  THE AUTHORING MODEL. register() is DECLARATION ONLY — it names the components
 //  this extension contributes and nothing else. There is no logic in register():
 //    • surface.application.register — the ONE app; mount(context) renders the whole view
-//    • surface.daemon.register      — the headless, always-on component that is the
+//    • surface.daemons.register     — the headless, always-on components (each
+//                                     with a declared id; one is the norm), the
 //                                     HOME for background logic and for every
 //                                     registration whose closure must outlive any
-//                                     visible surface (actions, option sources,
-//                                     status-bar items)
+//                                     visible surface (actions, option sources)
 //
 //  Everything a component does at runtime comes from its MOUNT CONTEXT, never from
 //  register(). The daemon's mount(context) is where the logic lives; the app's
@@ -74,7 +74,7 @@ import { createRoot } from 'react-dom/client';
 // this minimal app by ~megabytes. The subpath pulls only the action machinery.
 import { ActionButton } from '@frontierengineer/ui/useAction';
 import type { SurfaceProvider, SurfaceApplicationContext, Bus } from '../../types';
-import type { HelloState, WorkerPush, WorkerRequest, WorkerInspectReply } from '../messages'; // our own root file (one level up); the host contract is '../../types' (two)
+import type { HelloState, WorkerHeartbeat, WorkerInspectReply } from '../messages'; // our own root file (one level up); the host contract is '../../types' (two)
 
 // The app's launcher glyph: an SVG path `d` drawn in a `0 0 16 16` viewBox and
 // stroked in currentColor (the host tints it with the app's color). A globe —
@@ -128,22 +128,21 @@ function useGreeting(bus: Bus): string | null {
 
 // ── The whole app: one full view, rendered into context.container ──────────────
 // Reads live state, bumps the counter via the server, edits the note via a host
-// modal, and renders the worker heartbeats pushed straight over the platform
-// channel. The app owns its entire rect — here a single scrollable page.
+// modal, and renders the worker heartbeats published straight onto the one bus
+// by each machine's daemon. The app owns its entire rect — a scrollable page.
 function HelloApp({ context }: { context: SurfaceApplicationContext }) {
   const state = useHelloState(context.bus);
   const greeting = useGreeting(context.bus);
   const [heartbeats, setHeartbeats] = useState<Array<{ machine: string; hostname: string; at: string }>>([]);
 
-  // EVENTS: render the worker daemons' live pushes. The channel is a PLATFORM
-  // service, so the daemon's send() lands here directly — no host-bundle relay,
-  // no re-publish. The envelope names the machine the push came from (the
-  // payload never has to carry routing facts itself).
+  // EVENTS: render the worker daemons' live pushes. There is ONE bus across
+  // the realms, so the daemon's publish() lands here directly — no host-bundle
+  // relay, no re-publish. The envelope names the machine the push came from
+  // (the payload never has to carry routing facts itself).
   useEffect(() => {
-    const sub = context.channel.onMessage((raw, envelope) => {
-      const msg = raw as WorkerPush;
-      if (msg.kind !== 'heartbeat') return;
-      setHeartbeats((prev) => [{ machine: envelope.machine, hostname: msg.hostname, at: msg.at }, ...prev].slice(0, 5));
+    const sub = context.bus.extension.subscribe('worker.heartbeat', (raw, envelope) => {
+      const msg = raw as WorkerHeartbeat;
+      setHeartbeats((prev) => [{ machine: envelope.machine ?? '?', hostname: msg.hostname, at: msg.at }, ...prev].slice(0, 5));
     });
     return () => sub.unsubscribe();
   }, [context]);
@@ -227,7 +226,7 @@ function HelloApp({ context }: { context: SurfaceApplicationContext }) {
       <WorkerInspector context={context} />
 
       <section style={{ margin: '16px 0' }}>
-        <strong>Live worker heartbeats</strong> (pushed by each daemon straight over the channel):
+        <strong>Live worker heartbeats</strong> (published by each daemon straight onto the one bus):
         {heartbeats.length === 0 ? (
           <p style={{ opacity: 0.6, margin: '4px 0' }}>none yet — connect a machine</p>
         ) : (
@@ -243,7 +242,7 @@ function HelloApp({ context }: { context: SurfaceApplicationContext }) {
 }
 
 // ── The worker round-trip, on demand ───────────────────────────────────────
-// Asks the worker daemon DIRECTLY over the platform channel — no host-bundle
+// Asks the worker daemon DIRECTLY with a targeted bus request — no host-bundle
 // hop. The `{ machine }` target routes the request to that machine's daemon
 // (a slot-scoped call would target `{ reservationId }` instead, and the
 // daemon would read the reservation off its envelope); the platform owns the
@@ -261,8 +260,7 @@ function WorkerInspector({ context }: { context: SurfaceApplicationContext }) {
     if (!target) { setResult('no connected machine'); return; }
     setResult('inspecting…');
     try {
-      const request: WorkerRequest = { kind: 'inspect' };
-      const reply = await context.channel.request<WorkerRequest, WorkerInspectReply>({ machine: target }, request);
+      const reply = await context.bus.extension.request<WorkerInspectReply>('worker.inspect', {}, { target: { machine: target } });
       setResult(JSON.stringify(reply, null, 2));
     } catch (err: any) {
       setResult(`error: ${err?.message || err}`);
@@ -271,7 +269,7 @@ function WorkerInspector({ context }: { context: SurfaceApplicationContext }) {
 
   return (
     <section style={{ margin: '16px 0' }}>
-      <strong>Worker inspect</strong> (surface ⇄ worker over the platform channel, correlated reply):
+      <strong>Worker inspect</strong> (surface ⇄ worker over the one bus, targeted, correlated reply):
       <div style={{ margin: '4px 0' }}>
         <select
           value={machine}
@@ -305,7 +303,8 @@ export function register(surfaceProvider: SurfaceProvider): void {
   // context IS a SurfaceContext (context.bus to talk to the server, plus
   // context.localSettings, context.modals, and the context.workers/context.workspaces substrate),
   // plus the registration surfaces (context.actions and context.optionSources).
-  surface.daemon.register({
+  surface.daemons.register({
+    id: 'hello-world',
     mount(context) {
       // ── A ZERO-ARGUMENT ACTION: the successor to a command ────────────────
       // There are no "commands" anymore — every operation is an action, and every

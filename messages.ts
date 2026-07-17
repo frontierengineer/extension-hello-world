@@ -6,15 +6,16 @@
 // (browser) both import these types so a request and its responder, or an
 // event and its subscriber, can't drift out of shape without a type error.
 //
-// Three groups, matching the three things that travel between UI and server
-// on this extension's PRIVATE channel (`bus.extension.*`):
-//   • Requests — UI asks, server answers (request ⇄ respond).
-//   • Events   — server announces, UI (and other server subscribers) listen.
+// Three groups, matching the three things that travel on this extension's
+// PRIVATE bus (`bus.extension.*`) — the ONE bus every realm is on, worker
+// daemons included (a call reaches a worker by naming a target):
+//   • Requests — a caller asks, a responder answers (request ⇄ respond). Most
+//     responders live in the host daemon; `worker.inspect` is answered by the
+//     WORKER daemon, so callers address it with a target.
+//   • Events   — announced fire-and-forget; subscribers listen. Most come from
+//     the host daemon; `worker.heartbeat` is published by the worker daemon,
+//     and its delivery envelope names the machine it came from.
 //   • Public   — the ONE versioned endpoint other extensions may call.
-//
-// (The worker↔server channel is a different transport — a raw JSON link, not
-// the bus — so its protocol lives in its own section of server/worker code,
-// not here. See WorkerRequest/WorkerPush at the bottom for those shapes.)
 // ─────────────────────────────────────────────────────────────────────────
 
 // The single piece of durable state this extension keeps: a counter the user
@@ -84,25 +85,22 @@ export interface PublicApi {
   'count.get': { version: 1; params: Record<string, never>; response: { count: number } };
 }
 
-// ── Worker channel protocol (surface/host ⇄ worker, NOT the bus) ───────────
+// ── Worker traffic (surface/host ⇄ worker, on the SAME one bus) ─────────────
 //
-// The platform channel carries opaque JSON; these are OUR payloads over it.
-// Any of this extension's surface or host code addresses the worker daemon
-// with a target — `{ machine }` here (machine-scoped inspection), or
-// `{ reservationId }` for slot-scoped work (the daemon reads the reservation
-// off its delivery envelope). The link speaks two dialects, and the split
-// here mirrors them:
-//   • WorkerRequest rides `channel.request(target, …)` and is answered by the
-//     worker's `channel.onRequest` handler — the PLATFORM owns the correlation
-//     and the timeout, so no request id appears in the payload.
-//   • WorkerPush rides plain `send()` — unsolicited, fire-and-forget; every
-//     channel subscriber (each open UI, the host daemon) receives it with an
+// There is one bus across all three realms; worker traffic is just bus
+// traffic with a target. Any of this extension's surface or host code
+// addresses the worker daemon by passing `{ target }` in the call's options —
+// `{ machine }` here (machine-scoped inspection), or `{ reservationId }` for
+// slot-scoped work (the daemon reads the reservation off its delivery
+// envelope). The two bus dialects carry the two directions:
+//   • 'worker.inspect' rides `bus.extension.request(type, payload, { target })`
+//     and is answered by the worker daemon's `respond('worker.inspect', …)` —
+//     the PLATFORM owns the correlation and the timeout, so no request id
+//     appears in the payload (WorkerInspectReply is the responder's return).
+//   • 'worker.heartbeat' rides the worker's plain `publish()` — unsolicited,
+//     fire-and-forget; every surface/host subscriber receives it with an
 //     envelope naming the sending machine.
-// Branch on `kind` to grow either side of the protocol.
-export type WorkerRequest =
-  // caller → worker: please inspect the machine; the reply is the handler's
-  // return value (a WorkerInspectReply).
-  { kind: 'inspect' };
-export type WorkerPush =
-  // worker → host bundle: an unsolicited push the host bundle fans out to UIs.
-  { kind: 'heartbeat'; hostname: string; at: string };
+// The bus type names the message, so the payloads carry no `kind` field.
+export type WorkerHeartbeat =
+  // worker → every subscriber: an unsolicited liveness push.
+  { hostname: string; at: string };

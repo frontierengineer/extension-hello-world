@@ -3,15 +3,16 @@
 // ═══════════════════════════════════════════════════════════════════════════
 //
 //  REALM: host (the host-process bundle). Runs once, in the HOST process, when
-//  the extension loads. The UI reaches it over the bus; the worker daemons are
-//  reached over the PLATFORM channel, which surface and host bundles address
-//  directly (by machine or by reservation) — the host is a peer on that
-//  channel, not a relay in the middle:
+//  the extension loads. There is ONE bus and every realm is on it — the
+//  browser, this file, and each machine's worker daemon. An untargeted call
+//  reaches this file's responders; the same call WITH a target reaches the
+//  worker daemon on that machine, and a worker's publishes flow back with an
+//  envelope naming the machine. The host is a peer on the bus, not a relay:
 //
 //        surface/index.tsx  ──bus.extension──►  host/index.ts
-//        (the browser)  ◄────────────────      (THIS FILE)
+//        (the browser)  ◄──────(one bus)─────  (THIS FILE)
 //               │                                   │
-//               └────── context.channel ────────────┴──►  worker/index.ts
+//               └── bus + { target } ───────────────┴──►  worker/index.ts
 //                    ({ machine } | { reservationId })       (the daemon)
 //
 //  An extension is up to three bundles, one directory each — surface/ (browser),
@@ -28,7 +29,7 @@
 //    §5  Private bus    — request/respond + publish for THIS extension's UI
 //    §6  Public bus     — one versioned endpoint OTHER extensions can call
 //    §7  MCP            — a tool the agent can call (host realm, shared memory)
-//    §8  Worker channel — what changed: the channel is a platform service the
+//    §8  Worker traffic — what changed: the one bus reaches the worker, so the
 //                         surface addresses directly, so this file no longer relays
 //
 //  The contract type comes from the host. `../../types` resolves to the vendored
@@ -124,12 +125,13 @@ export function register(hostProvider: HostProvider): void {
   const h = hostProvider.version(1);
   // register() is declaration-only: it names the one daemon this host bundle
   // runs. Everything below lives inside that daemon's mount().
-  h.daemon.register({ mount });
+  h.daemons.register({ id: 'hello-world', mount });
 }
 
 // The hello-world host daemon. Its mount() receives the flat HostDaemonContext —
 // every capability sits directly on it: `bus` is this extension's bus,
-// `channel` reaches its worker daemons (by machine or reservation), `store`/`scheduler` are the
+// `bus` is the one bus (a target on a call reaches its worker daemons by
+// machine or reservation), `store`/`scheduler` are the
 // backing capabilities, and `mcp` registers tools the agent can call (§7). This
 // daemon has nothing the platform cannot tear down for itself, so its mount
 // returns an empty handle (contrast worker/index.ts, whose daemon returns a
@@ -330,28 +332,30 @@ function mount(context: HostDaemonContext): { dispose?: () => void } {
   });
 
   // ─────────────────────────────────────────────────────────────────────────
-  //  §8  WORKER CHANNEL — a platform service, not a host relay
+  //  §8  WORKER TRAFFIC — the one bus reaches the worker, no host relay
   // ─────────────────────────────────────────────────────────────────────────
   //  Earlier revisions of this file sat between the UI and the worker: the UI
-  //  asked the host, the host held a per-machine channel, forwarded the
-  //  request, and re-published the worker's pushes onto the bus. The channel
-  //  is a PLATFORM service now, addressed directly from any realm with a
-  //  target — `{ machine }` for machine-scoped work, `{ reservationId }` for
-  //  slot-scoped work (the platform resolves the reservation to its machine
-  //  and stamps it on the delivery envelope, so the daemon knows which slot a
-  //  call concerns without the payload saying so).
+  //  asked the host, the host held a per-machine link, forwarded the request,
+  //  and re-published the worker's pushes onto the bus. There is ONE bus now,
+  //  across all three realms. A call that passes `{ target }` in its options —
+  //  `{ machine }` for machine-scoped work, `{ reservationId }` for
+  //  slot-scoped work — routes to the worker daemon on the resolved machine
+  //  (the platform stamps the reservation on the delivery envelope, so the
+  //  daemon knows which slot a call concerns without the payload saying so);
+  //  a call with no target stays among the surface/host responders exactly as
+  //  before.
   //
   //  So the inspect round-trip and the heartbeat stream both live where they
-  //  belong: surface/index.tsx calls `context.channel.request({ machine },
-  //  { kind: 'inspect' })` and subscribes `context.channel.onMessage` for the
-  //  daemon's pushes. This bundle writes NO relay code — a host daemon holds
-  //  the same `context.channel` and would use it the same way when host-side
+  //  belong: surface/index.tsx calls `bus.extension.request('worker.inspect',
+  //  {}, { target: { machine } })` and subscribes 'worker.heartbeat' for the
+  //  daemons' publishes. This bundle writes NO relay code — a host daemon
+  //  holds the same bus and would make the same targeted call when host-side
   //  logic (a schedule, an MCP tool) needs the machine's answer.
 
   void ready.then(() => console.log(`[hello-world] host ready (${greeting()})`));
 
   // Nothing to tear down by hand: the bus responders, the schedule, the MCP
-  // tool, and the channel's in-flight requests are all platform-tracked and
+  // tool, and any in-flight targeted requests are all platform-tracked and
   // settled on unload. `dispose` is optional, so this mount returns an empty
   // handle — contrast the worker daemon, whose interval the platform cannot see
   // and which therefore returns a real dispose.
