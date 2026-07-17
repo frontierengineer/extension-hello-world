@@ -28,7 +28,7 @@
 //  Everything a component does at runtime comes from its MOUNT CONTEXT, never from
 //  register(). The daemon's mount(context) is where the logic lives; the app's
 //  mount(context) is where the view renders. Both contexts ARE a SurfaceContext:
-//  the bus, localSettings, modals, navigate, and the sidebar and overlay controls are
+//  the bus, localSettings, and the applications/sidebars/overlays/modals controls are
 //  reached FLAT on the context (context.bus, context.store, context.modals — no `.services.` hop).
 //
 //  ACTIONS, NOT COMMANDS. There is no separate "command" concept: every operation is
@@ -52,7 +52,7 @@
 //                                drives the Info View from its docs, no glue code
 //    • context.bus.extension.*    — calling its own server + rendering live events
 //    • context.workers            — reading the substrate (connected machines)
-//    • context.lifecycle          — committing side effects only when activated
+//    • context.lifecycle          — running side effects only while focused
 //    • context.modals.prompt      — a host-rendered modal to collect ad-hoc input
 //    • data-help / data-help-title — hover annotations that feed the Info View
 //
@@ -296,7 +296,7 @@ export function register(surfaceProvider: SurfaceProvider): void {
   // mount(context) gives it the same runtime substrate a visible component gets: the
   // context IS a SurfaceContext (context.bus to talk to the server, plus
   // context.localSettings, context.modals, and the context.workers/context.workspaces substrate),
-  // plus the registration surfaces (context.actions, context.optionSources, context.statusBar).
+  // plus the registration surfaces (context.actions and context.optionSources).
   surface.daemon.register({
     mount(context) {
       // ── A ZERO-ARGUMENT ACTION: the successor to a command ────────────────
@@ -306,7 +306,7 @@ export function register(surfaceProvider: SurfaceProvider): void {
       // with no generated modal, and it still carries the palette fields a command
       // had (category groups it; defaultKey seeds a keybinding). It runs in the
       // daemon — a separate component from the app's mount — so it can't reach the
-      // app's React state or context.openExtension; it acts through the context. Here
+      // app's React state or its container; it acts through the context. Here
       // it edits the note via its own host prompt and sends it to the server over
       // the bus; the open app re-renders from the server's `state.changed` event.
       // Because every action is also agent-callable, write its `description` FOR the

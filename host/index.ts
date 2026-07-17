@@ -101,7 +101,7 @@ async function migrateStore(store: Store): Promise<void> {
   if (from >= SCHEMA_VERSION) return;
   if (from < 2) {
     const r = await store.getJson<Partial<HelloState>>(STATE_KEY);
-    if (!r.ok) throw new Error(r.error.message);
+    if (!r.ok) throw new Error(r.error);
     if (r.value !== null) {
       const old = r.value;
       // v2 added `note`; backfill it on records written by v1.
