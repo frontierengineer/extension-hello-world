@@ -1,32 +1,5 @@
 {
   "displayName": "Hello World",
   "defaultColor": "#14b8a6",
-  "description": "The reference Frontier extension \u2014 one small, heavily-commented example of all three realms (surface, host, worker) and the capabilities on them: the hub-and-spoke host connection (private and public), Store, MCP tools, Scheduler, and the host bundle relaying both directions of worker traffic.",
-  "realms": {
-    "surface": {
-      "applications": [
-        "hello-world"
-      ],
-      "sidebars": [],
-      "daemons": [
-        "hello-world"
-      ]
-    },
-    "host": {
-      "mcpTools": [
-        "bump"
-      ],
-      "voice": false,
-      "daemons": [
-        "hello-world"
-      ]
-    },
-    "worker": {
-      "runtimes": [],
-      "workspaces": [],
-      "daemons": [
-        "hello-world"
-      ]
-    }
-  }
+  "description": "The reference Frontier extension \u2014 one small, heavily-commented example of all three realms (surface, host, worker) and the capabilities on them: the hub-and-spoke host connection (private and public), Store, MCP tools, Scheduler, and the host bundle relaying both directions of worker traffic."
 }

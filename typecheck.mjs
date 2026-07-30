@@ -92,7 +92,7 @@ const configs = {
       types: ['node'],
       typeRoots: [NODE_TYPES],
     },
-    include: ['extensions/hello-world/host/index.ts'],
+    include: ['extensions/hello-world/host/index.ts', 'extensions/hello-world/host/contributions.ts'],
   },
   worker: {
     compilerOptions: {
@@ -103,7 +103,7 @@ const configs = {
       types: ['node'],
       typeRoots: [NODE_TYPES],
     },
-    include: ['extensions/hello-world/worker/index.ts'],
+    include: ['extensions/hello-world/worker/index.ts', 'extensions/hello-world/worker/contributions.ts'],
   },
   surface: {
     compilerOptions: {
@@ -126,7 +126,7 @@ const configs = {
         'react-dom/*': [join(FRONTEND_TYPES, 'react-dom/*')],
       },
     },
-    include: ['extensions/hello-world/surface/index.tsx'],
+    include: ['extensions/hello-world/surface/index.tsx', 'extensions/hello-world/surface/contributions.ts'],
   },
 };
 

@@ -87,8 +87,6 @@ import type { HelloState, WorkerHeartbeat, WorkerInspectResult } from '../messag
 // The application's launcher glyph: an SVG path `d` drawn in a `0 0 16 16`
 // viewBox and stroked in currentColor (the host tints it with the application's
 // color). A globe — the canonical "hello, world" mark, and clean at icon size.
-const HELLO_ICON = 'M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM1.5 8h13M8 1.5c1.8 1.7 2.8 4 2.8 6.5S9.8 12.8 8 14.5C6.2 12.8 5.2 10.5 5.2 8S6.2 3.2 8 1.5z';
-
 // ── A tiny hook: live state from the host bundle ────────────────────────────
 // Fetch the current state once (request → the host daemon's `state.get`
 // responder), then stay live by subscribing to `state.changed` (the host daemon
@@ -457,10 +455,13 @@ export function register(surfaceProvider: SurfaceProvider): void {
   // application from the launcher.
   let root: ReturnType<typeof createRoot> | null = null;
   surface.application.register({
+    // The id joins this mount to the application declared in
+    // surface/contributions.ts, which is where its title, icon, colour and
+    // capability floor live. `requires` here is a different question, and null is
+    // the answer whenever there is one mount: it selects among SEVERAL mounts for
+    // one declared application (a desktop layout and a phone layout), never
+    // whether the application is offered.
     id: 'hello-world',
-    title: 'Hello World',
-    icon: HELLO_ICON,
-    color: '#14b8a6',
     requires: null,
     mount(context: SurfaceApplicationContext) {
       root = createRoot(context.container);

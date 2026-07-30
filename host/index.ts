@@ -319,19 +319,11 @@ function mount(context: HostDaemonContext): { dispose?: () => void } {
   // normal result; return `isError: true` for a failure the agent should reason
   // about.
   const text = (t: string): ToolResult => ({ content: [{ type: 'text', text: t }], isError: null });
+  // The name joins this handler to the tool declared in host/contributions.ts,
+  // which is where everything the agent reads lives — title, description, input
+  // schema. Registering a name that file does not declare is refused.
   context.mcp.registerTool({
     name: 'bump',
-    title: 'Bump the Hello World counter',
-    description:
-      'Increment the Hello World extension\'s shared counter. Use when asked to ' +
-      'demonstrate that an agent can mutate an extension\'s persisted state via a tool. ' +
-      'Pass `by` to add more than 1.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        by: { type: 'number', description: 'How much to add (default 1).' },
-      },
-    },
     handler: async (args: { by?: number }, _ctx: ToolContext): Promise<ToolResult> => {
       await ready;
       const state = await readState();
