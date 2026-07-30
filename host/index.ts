@@ -3,20 +3,24 @@
 // ═══════════════════════════════════════════════════════════════════════════
 //
 //  REALM: host (the host-process bundle). Runs once, in the HOST process, when
-//  the extension loads. There is ONE bus and every realm is on it — the
-//  browser, this file, and each machine's worker daemon. An untargeted call
-//  reaches this file's responders; the same call WITH a target reaches the
-//  worker daemon on that machine, and a worker's publishes flow back with an
-//  envelope naming the machine. The host is a peer on the bus, not a relay:
+//  the extension loads. Every OTHER bundle of this extension — each surface, and
+//  the worker bundle on each connected worker — holds exactly ONE connection,
+//  and it is to here. This file is the hub they are all spokes of:
 //
-//        surface/index.tsx  ──bus.extension──►  host/index.ts
-//        (the browser)  ◄──────(one bus)─────  (THIS FILE)
-//               │                                   │
-//               └── bus + { target } ───────────────┴──►  worker/index.ts
-//                    ({ machine } | { reservationId })       (the daemon)
+//        surface/index.tsx  ──context.host──►  host/index.ts
+//        (the browser)      ◄─────────────────  (THIS FILE, the hub)
+//                                                    │
+//                              worker/index.ts  ◄────┘
+//                              (on each worker)   host.request(t, { worker })
+//
+//  Nothing in that picture is a shortcut: a surface never addresses a worker and
+//  a worker never addresses a surface. Cross-realm behavior is THIS bundle's
+//  job — the surface asks here, here asks the worker, and the answer travels
+//  back the same way (§8). One topology, hub and spoke, with nothing to reason
+//  about beyond "who is my host, and what did it say".
 //
 //  An extension is up to three bundles, one directory each — surface/ (browser),
-//  host/ (this), worker/ (each machine's daemon) — compiled, loaded, and run
+//  host/ (this), worker/ (each worker's daemon) — compiled, loaded, and run
 //  separately in their own realms. MCP tools and voice overrides live on the
 //  host realm, so this one file both answers the UI and contributes the agent
 //  tool (§7); there is no separate mcp/ bundle.
@@ -26,15 +30,13 @@
 //    §2  Self-migration — upgrade our OWN Store data across schema versions
 //    §3  Settings       — a setting the extension owns the UI for (Store-backed)
 //    §4  Scheduler      — a recurring host-managed timer
-//    §5  Private bus    — request/respond + publish for THIS extension's UI
-//    §6  Public bus     — one versioned endpoint OTHER extensions can call
+//    §5  The hub        — answer this extension's surfaces, and announce to them
+//    §6  Public         — one versioned endpoint OTHER extensions can call
 //    §7  MCP            — a tool the agent can call (host realm, shared memory)
-//    §8  Worker traffic — what changed: the one bus reaches the worker, so the
-//                         surface addresses directly, so this file no longer relays
+//    §8  Worker traffic — the hub is the only path to a worker bundle
 //
-//  The contract type comes from the host. `../../types` resolves to the vendored
-//  contract at the repo root here, and to the host-written shim in production —
-//  see README → "How types resolve".
+//  The contract type comes from the host: `../../types` is a sibling of every
+//  installed extension directory — see README → "How types resolve".
 //
 //  register() receives a PROVIDER; call version(1) for the v1 realm shape.
 //  register() is DECLARATION-ONLY: it names the single daemon this bundle runs
@@ -46,21 +48,21 @@
 //  (this daemon has nothing of the sort, so it returns an empty handle).
 
 // Two different import depths, and the difference matters:
-//   • `../../types`   — the HOST contract. Two levels up because in production
-//     the host writes a types shim ABOVE the extension dir (extensions/types.ts),
-//     a sibling of every installed extension. (Standalone: the vendored copy at
-//     this repo's root, reached the same way — see README.)
+//   • `../../types`   — the HOST contract. Two levels up because the host writes
+//     a types shim ABOVE the extension dir (extensions/types.ts), a sibling of
+//     every installed extension.
 //   • `../messages`   — THIS extension's OWN shared file at its root, one level
 //     up from a realm dir. It is not a host file; it ships with us.
 import type {
   HostProvider,
   HostDaemonContext,
+  ExtensionConnection,
   Store,
   Scheduler,
   ToolResult,
   ToolContext,
 } from '../../types';
-import type { HelloState } from '../messages';
+import type { HelloState, WorkerInspectReply } from '../messages';
 
 // ── Store key + defaults ───────────────────────────────────────────────────
 // One key holds the whole state blob as JSON, read and written through the
@@ -75,17 +77,17 @@ function freshState(): HelloState {
 // ═══════════════════════════════════════════════════════════════════════════
 //  §2  SELF-MANAGED MIGRATION — upgrade our OWN Store data ourselves
 // ═══════════════════════════════════════════════════════════════════════════
-//  WHY this lives here now: the host NEVER understands an extension's Store —
-//  it's raw bytes WE own. There is no `dataVersion` manifest field and no
-//  host-called `migrate()` hook anymore; an extension self-manages format
-//  changes inside its OWN stored data. That means WE keep the version marker
-//  (another key in our own Store), WE decide when it runs, and WE step it
-//  forward.
+//  WHY this lives here: the host NEVER understands an extension's Store — it is
+//  raw bytes WE own. There is no `dataVersion` manifest field and no
+//  host-called `migrate()` hook, because the host cannot migrate a shape it does
+//  not understand and does not try. An extension self-manages format changes
+//  entirely inside its OWN stored data: WE keep the version marker (another key
+//  in our own Store), WE decide when it runs, and WE step it forward.
 //
 //  THE PATTERN:
 //    • SCHEMA_VERSION is the format THIS build writes.
 //    • VERSION_KEY holds the version our data was last migrated to — OUR key in
-//      OUR Store (contrast the old model, where the host owned that marker).
+//      OUR Store.
 //    • On load, before we serve any request, we read the marker and, if it is
 //      behind, step one version at a time (v1→v2, then v2→v3, …) so any starting
 //      point converges, then stamp the new version. A brand-new install has no
@@ -129,15 +131,14 @@ export function register(hostProvider: HostProvider): void {
 }
 
 // The hello-world host daemon. Its mount() receives the flat HostDaemonContext —
-// every capability sits directly on it: `bus` is this extension's bus,
-// `bus` is the one bus (a target on a call reaches its worker daemons by
-// machine or reservation), `store`/`scheduler` are the
-// backing capabilities, and `mcp` registers tools the agent can call (§7). This
-// daemon has nothing the platform cannot tear down for itself, so its mount
-// returns an empty handle (contrast worker/index.ts, whose daemon returns a
-// real dispose for its interval).
+// every capability sits directly on it: `host` is the HUB (the connections every
+// other bundle of this extension holds, plus this extension's public
+// endpoints), `store`/`scheduler` are the backing capabilities, and `mcp`
+// registers tools the agent can call (§7). This daemon has nothing the platform
+// cannot tear down for itself, so its mount returns an empty handle (contrast
+// worker/index.ts, whose daemon returns a real dispose for its interval).
 function mount(context: HostDaemonContext): { dispose?: () => void } {
-  const { bus } = context;
+  const { host } = context;
   const store: Store = context.store;
   const scheduler: Scheduler = context.scheduler;
 
@@ -157,19 +158,20 @@ function mount(context: HostDaemonContext): { dispose?: () => void } {
     return r.value;
   }
 
-  // Persist the state blob AND announce the change on the bus (§5) so every
-  // open UI re-renders. One helper = every mutation stays consistent.
+  // Persist the state blob AND announce the change to every connected bundle
+  // (§5) so every open UI re-renders. One helper = every mutation stays
+  // consistent.
   async function writeState(next: HelloState): Promise<HelloState> {
     next.updatedAt = new Date().toISOString();
     await store.putJson({ key: STATE_KEY, value: next });
-    bus.extension.publish('state.changed', next);
+    host.publish('state.changed', 'all', next);
     return next;
   }
 
   // We own our data migration (§2): run it FIRST, so by the time any responder
   // below serves a request the Store is guaranteed to be at the current format
-  // and register() never has to defend against an old shape. Then make the state
-  // blob exist so the very first UI read gets a real value. A typed Store read
+  // and nothing has to defend against an old shape. Then make the state blob
+  // exist so the very first UI read gets a real value. A typed Store read
   // returns a wrapper, so a miss is `{ value: null }` — read `.value`, never
   // compare the result object to null. Responders below await `ready` so none
   // races this startup.
@@ -185,11 +187,11 @@ function mount(context: HostDaemonContext): { dispose?: () => void } {
   //  REALM: host. There is no config service and no host-rendered settings
   //  panel: a setting is just durable Store state under a `settings/` prefix,
   //  which the extension reads here and writes from its OWN in-app editing
-  //  surface (surface/index.tsx), exposing get/set to its UI over the bus (§5).
-  //  We cache the value in memory so this accessor stays synchronous, seed it
-  //  from the Store as part of `ready` (loadGreeting), and refresh the cache on
-  //  every write. This is the canonical "settings live in your own UI, persisted
-  //  to the Store" pattern.
+  //  surface (surface/index.tsx), exposing get/set to its UI through the two
+  //  responders in §5. We cache the value in memory so this accessor stays
+  //  synchronous, seed it from the Store as part of `ready` (loadGreeting), and
+  //  refresh the cache on every write. This is the canonical "settings live in
+  //  your own UI, persisted to the Store" pattern.
   const DEFAULT_GREETING = 'Hello';
   const GREETING_KEY = 'settings/greeting';
   let currentGreeting = DEFAULT_GREETING;
@@ -209,7 +211,7 @@ function mount(context: HostDaemonContext): { dispose?: () => void } {
   //  on reload. This one is a PURE timer (it dispatches no agent turn), so it
   //  passes reservationId: null — it holds no workspace slot. Here it just
   //  re-announces the current state every few minutes to keep idle UIs fresh. The
-  //  id is now a top-level argument; the options object carries the rest.
+  //  id is a top-level argument; the options object carries the rest.
   scheduler.register('hello-world.heartbeat', {
     // A ScheduleSpecification names both axes and nulls the unused one — the
     // fields are required-and-nullable, so 'interval' sets `interval` and leaves
@@ -218,71 +220,81 @@ function mount(context: HostDaemonContext): { dispose?: () => void } {
     handler: async () => {
       await ready;
       const state = await readState();
-      bus.extension.publish('state.changed', state);
+      host.publish('state.changed', 'all', state);
     },
     // A pure timer holds no reservation — null over an omitted optional.
     reservationId: null,
   });
 
   // ─────────────────────────────────────────────────────────────────────────
-  //  §5  PRIVATE BUS — request/respond + publish for THIS extension's UI
+  //  §5  THE HUB — answer this extension's surfaces, and announce to them
   // ─────────────────────────────────────────────────────────────────────────
-  //  REALM: host answers its own UI. `bus.extension` is fully PRIVATE — no
-  //  other extension can see it. A `request` from surface/index.tsx lands on the
-  //  matching `respond` here; the return value travels back to the UI promise.
-  //  `publish` (used in writeState above) fans an event out to every UI that
-  //  subscribed. This is the extension's frontend↔backend microservice link.
+  //  REALM: host answers its own bundles. `context.host` is the hub end of the
+  //  one connection each of them holds, and it is fully PRIVATE — no other
+  //  extension can see any of it. A `request` from surface/index.tsx lands on
+  //  the matching `respond` here; the return value travels back to the UI
+  //  promise. `publish(type, to, payload)` fans an event out to every
+  //  connection the SELECTOR names that subscribed to that type — 'all' here,
+  //  because a state change concerns every open surface. This is the
+  //  extension's frontend↔backend microservice link.
+  //
+  //  The hub addresses CONNECTIONS, never realms: 'all', `{ id }` for one exact
+  //  bundle, `{ device }` for every bundle on a device, `{ worker }` for the one
+  //  on a worker. A responder's second argument is the ExtensionConnection that
+  //  asked, so it can answer differently per caller or call back to exactly
+  //  that bundle (§8 uses it).
   //
   //  Each responder's payload/return type is checked against messages.ts, so a
   //  UI call and this handler can't drift apart silently.
 
-  bus.extension.respond('state.get', async () => {
+  host.respond('state.get', async () => {
     await ready;
     return readState();
   });
 
-  bus.extension.respond('state.bump', async (params: { by?: number }) => {
+  host.respond('state.bump', async (params: { by?: number }) => {
     await ready;
     const state = await readState();
     state.count += typeof params?.by === 'number' ? params.by : 1;
     return writeState(state);
   });
 
-  bus.extension.respond('note.set', async (params: { note: string }) => {
+  host.respond('note.set', async (params: { note: string }) => {
     await ready;
     const state = await readState();
     state.note = typeof params?.note === 'string' ? params.note : '';
     return writeState(state);
   });
 
-  // The greeting SETTING, read + written over the bus (its in-app surface lives
-  // in surface/index.tsx). The UI never touches the Store directly — it asks the
-  // host bundle, so there is one writer and one source of truth (the same rule as the
-  // Store state in §1). `set` persists to settings/greeting and announces the
-  // change so an open UI updates live.
-  bus.extension.respond('greeting.get', async () => { await ready; return { greeting: greeting() }; });
+  // The greeting SETTING, read + written over the connection (its in-app surface
+  // lives in surface/index.tsx). The UI never touches the Store directly — it
+  // asks the host bundle, so there is one writer and one source of truth (the
+  // same rule as the Store state in §1). `set` persists to settings/greeting and
+  // announces the change so an open UI updates live.
+  host.respond('greeting.get', async () => { await ready; return { greeting: greeting() }; });
 
-  bus.extension.respond('greeting.set', async (params: { greeting: string }) => {
+  host.respond('greeting.set', async (params: { greeting: string }) => {
     const value = (typeof params?.greeting === 'string' ? params.greeting : '').trim() || DEFAULT_GREETING;
     await store.putJson({ key: GREETING_KEY, value }); // async: resolves once the write hits disk
     currentGreeting = value;
-    bus.extension.publish('greeting.changed', { greeting: value });
+    host.publish('greeting.changed', 'all', { greeting: value });
     console.log(`[hello-world] greeting is now: ${value}`);
     return { greeting: value };
   });
 
   // ─────────────────────────────────────────────────────────────────────────
-  //  §6  PUBLIC BUS — one versioned endpoint OTHER extensions can call
+  //  §6  PUBLIC — one versioned endpoint OTHER extensions can call
   // ─────────────────────────────────────────────────────────────────────────
-  //  REALM: host, cross-extension contract. `bus.public.respond(topic,
+  //  REALM: host, cross-extension contract. `host.public.respond(topic,
   //  version, handler)` exposes ONE endpoint outside this extension. Another
-  //  extension reaches it read-only via `bus.extensions('hello-world')
-  //  .request('count.get')`, and a running agent can reach it via the host
-  //  `frontier.bus_call` tool. The PRIVATE responders in §5 stay invisible —
-  //  only what is registered here crosses the boundary. Versioning is
-  //  first-class: ship a v2 alongside v1, then bus.public.deprecate(...) the
-  //  old one when callers have moved.
-  bus.public.respond('count.get', 1, async () => {
+  //  extension reaches it read-only by resolving us first —
+  //  `const hw = await host.extensions('hello-world')`, which is null when we
+  //  are not installed, then `hw.request('count.get')` — and a running agent can
+  //  reach it via the core `frontier.bus_call` tool. The PRIVATE responders in
+  //  §5 stay invisible: only what is registered here crosses the boundary.
+  //  Versioning is first-class: ship a v2 alongside v1, then
+  //  host.public.deprecate(...) the old one when callers have moved.
+  host.public.respond('count.get', 1, async () => {
     await ready;
     const state = await readState();
     return { count: state.count };
@@ -294,15 +306,15 @@ function mount(context: HostDaemonContext): { dispose?: () => void } {
   //  REALM: host. `context.mcp.registerTool` contributes a tool to EVERY agent turn
   //  across all sessions; the host namespaces it by extension id, so the agent
   //  sees this one as `hello-world.bump`. MCP is not its own bundle — it lives
-  //  in host/, the same realm (and the same module instance) as the bus
-  //  responders above, so this tool shares memory with them: it reuses the very
-  //  same readState/writeState, and because writeState publishes on the private
-  //  bus, bumping the counter from the agent updates every open UI instantly —
-  //  no Store-polling seam needed. The handler runs on the HOST (not the
-  //  worker), so it has the extension's Store, scheduler, and bus. `description`
-  //  is what the model reads to decide when to call it — write it for the agent;
-  //  `inputSchema` is JSON Schema the host converts for the MCP SDK;
-  //  `ctx.sessionId` identifies the agent run (unused here).
+  //  in host/, the same realm (and the same module instance) as the responders
+  //  above, so this tool shares memory with them: it reuses the very same
+  //  readState/writeState, and because writeState publishes 'state.changed' to
+  //  every connection, bumping the counter from the agent updates every open UI
+  //  instantly — no Store-polling seam needed. The handler runs on the HOST (not
+  //  the worker), so it has the extension's Store, scheduler, and hub.
+  //  `description` is what the model reads to decide when to call it — write it
+  //  for the agent; `inputSchema` is JSON Schema the host converts for the MCP
+  //  SDK; `ctx.sessionId` identifies the agent run (unused here).
   // A ToolResult sets `isError` explicitly (null-over-optional): null marks a
   // normal result; return `isError: true` for a failure the agent should reason
   // about.
@@ -332,31 +344,152 @@ function mount(context: HostDaemonContext): { dispose?: () => void } {
   });
 
   // ─────────────────────────────────────────────────────────────────────────
-  //  §8  WORKER TRAFFIC — the one bus reaches the worker, no host relay
+  //  §8  WORKER TRAFFIC — the hub is the only path to a worker bundle
   // ─────────────────────────────────────────────────────────────────────────
-  //  Earlier revisions of this file sat between the UI and the worker: the UI
-  //  asked the host, the host held a per-machine link, forwarded the request,
-  //  and re-published the worker's pushes onto the bus. There is ONE bus now,
-  //  across all three realms. A call that passes `{ target }` in its options —
-  //  `{ machine }` for machine-scoped work, `{ reservationId }` for
-  //  slot-scoped work — routes to the worker daemon on the resolved machine
-  //  (the platform stamps the reservation on the delivery envelope, so the
-  //  daemon knows which slot a call concerns without the payload saying so);
-  //  a call with no target stays among the surface/host responders exactly as
-  //  before.
+  //  A surface holds one connection and it is to here, so it cannot ask a worker
+  //  anything. This bundle can: the hub addresses any connected bundle of this
+  //  extension by selector, and a worker bundle is just a connection whose
+  //  `worker` is set (and whose `device` is null — which of the two is set is
+  //  what the connection IS; there is no separate realm field). So both
+  //  directions of worker traffic are relays written HERE, and this is the whole
+  //  of them.
   //
-  //  So the inspect round-trip and the heartbeat stream both live where they
-  //  belong: surface/index.tsx calls `bus.extension.request('worker.inspect',
-  //  {}, { target: { machine } })` and subscribes 'worker.heartbeat' for the
-  //  daemons' publishes. This bundle writes NO relay code — a host daemon
-  //  holds the same bus and would make the same targeted call when host-side
-  //  logic (a schedule, an MCP tool) needs the machine's answer.
+  //  Which workers can be asked is a question about THIS extension's
+  //  connections, not about the fleet: `context.workers` lists every worker the
+  //  host knows, but our worker bundle only answers on the ones where it is
+  //  actually loaded. `host.connections('all')` is the honest list, and it is
+  //  read at the moment of use rather than cached, because a worker's connection
+  //  comes and goes with the worker.
+  const workerConnections = (): ExtensionConnection[] =>
+    host.connections('all').filter((c) => c.worker !== null);
+
+  // ── Direction 1: a surface asks a worker something (request, relayed) ──────
+  // The surface names a worker (or null for "whichever is there") and asks
+  // 'worker.inspect'; we resolve that to one connection, forward it as 'inspect'
+  // on the worker leg with a `{ worker }` selector, and hand the answer back.
+  // Resolving here rather than in the surface is not politeness: a selector must
+  // name EXACTLY ONE connection, and 'all' or an unknown worker is refused before
+  // anything is sent, so the hub is the only place that can turn "whichever
+  // worker" into a legal selector.
+  //
+  // "Nothing to ask" is an EXPECTED outcome (a fresh install has no worker bundle
+  // anywhere yet), so it comes back as this topic's own failure arm and the
+  // caller must branch on it. It is deliberately NOT a throw: a throw would be
+  // reported by the shared boundary to the log, telemetry, and the error stream,
+  // which is right for a fault and wrong for a routine state. The forwarded
+  // request is left to reject on its own, because a worker whose responder threw
+  // or whose connection dropped IS a fault, and the boundary should say so.
+  host.respond('worker.inspect', async (params: { worker: string | null }) => {
+    const connected = workerConnections();
+    const wanted = typeof params?.worker === 'string' && params.worker ? params.worker : null;
+    const chosen = wanted
+      ? connected.find((c) => c.worker === wanted)
+      : connected[0];
+    if (!chosen) {
+      return {
+        ok: false as const,
+        error: wanted
+          ? `hello-world is not loaded on worker ${wanted}`
+          : 'no worker is running the hello-world worker bundle yet',
+      };
+    }
+    const report = await host.request<WorkerInspectReply>('inspect', { worker: chosen.worker! });
+    return { ok: true as const, report };
+  });
+
+  // ── Direction 2: a worker announces something (publish, re-published) ─────
+  // The worker daemon's publish reaches its one peer — this bundle — and stops
+  // there. `from` tells us which connection spoke, so we fold its worker id into
+  // the record and fan the result out to every surface: a spoke's subscribe
+  // handler receives the payload alone, so any routing fact a surface needs has
+  // to be IN the payload, put there by the hub that knew it.
+  //
+  // The hub also KEEPS the latest beat per worker, and that is not incidental.
+  // Delivery is live signaling — nothing is queued across a disconnect and a
+  // surface that mounts between beats has missed them all — so an event stream
+  // alone cannot tell a fresh view what is true right now. Whoever holds the
+  // durable-enough copy has to answer for it, and here that is the hub: it
+  // serves the current set on request AND announces the current set on every
+  // change, both as the same shape, so a view reads once and then replaces.
+  const lastBeat = new Map<string, { worker: string; hostname: string; at: string }>();
+  const heartbeats = () => [...lastBeat.values()].sort((a, b) => b.at.localeCompare(a.at));
+  const announceHeartbeats = () => host.publish('worker.heartbeats', 'all', heartbeats());
+
+  host.respond('worker.heartbeats', () => heartbeats());
+
+  // Priming the kept state, so it is never merely stale-because-new. This bundle
+  // reloads (an extension update, a host restart) while the worker bundles stay
+  // connected and keep beating on THEIR schedule — so a freshly loaded hub knows
+  // nothing for up to a full interval, and every surface that mounts in that
+  // window sees an empty list next to a connected worker. The fix is not a
+  // shorter interval, it is to ASK: requestAll() fans one question out and keeps
+  // every answer, resolving when each has answered or timed out, so a bundle that
+  // cannot answer comes back as its own `{ ok: false }` and cannot cost us the
+  // rest.
+  //
+  // The selector says 'all' because "every worker" is not something a selector can
+  // say — the vocabulary is 'all' / one device / one worker — so the fan-out
+  // reaches this extension's surfaces too. They have no 'beat' responder and
+  // answer `{ ok: false }`, and the `from.worker` filter is what makes the result
+  // worker-only. That is precisely the tolerance requestAll exists for.
+  let priming = false;
+  async function primeHeartbeats(): Promise<void> {
+    if (priming) return;
+    priming = true;
+    try {
+      const answers = await host.requestAll<{ hostname: string; at: string }>('beat', 'all');
+      let learned = false;
+      for (const answer of answers) {
+        if (!answer.ok || !answer.from.worker) continue;
+        lastBeat.set(answer.from.worker, {
+          worker: answer.from.worker,
+          hostname: answer.result.hostname,
+          at: answer.result.at,
+        });
+        learned = true;
+      }
+      if (learned) announceHeartbeats();
+    } finally {
+      priming = false;
+    }
+  }
+
+  host.subscribe('heartbeat', (payload: { hostname: string; at: string }, from: ExtensionConnection) => {
+    // A publish can only reach us over a connection, and a worker connection is
+    // the only kind that beats — but read the id off `from` rather than trusting
+    // the payload, and skip anything that is not a worker rather than inventing
+    // a key for it.
+    if (!from.worker) return;
+    lastBeat.set(from.worker, { worker: from.worker, hostname: payload.hostname, at: payload.at });
+    announceHeartbeats();
+  });
+
+  // Watching membership instead of polling connections(): one subscription, the
+  // full current set on every change (a bundle connected or dropped). It is what
+  // keeps the kept state honest at both ends — a worker that went away must stop
+  // being reported as alive (its connection dropping is the only notice of that
+  // there is), and a worker that just arrived should not have to wait out an
+  // interval before it appears.
+  host.onConnectionsChanged((connections) => {
+    const live = new Set(connections.map((c) => c.worker).filter((w): w is string => w !== null));
+    let dropped = false;
+    for (const worker of [...lastBeat.keys()]) {
+      if (!live.has(worker)) { lastBeat.delete(worker); dropped = true; }
+    }
+    if (dropped) announceHeartbeats();
+    // Ask, rather than wait, for any worker we have nothing from yet.
+    if ([...live].some((w) => !lastBeat.has(w))) void primeHeartbeats();
+  });
+
+  // And ask once at mount, for the workers that were already connected before
+  // this bundle existed.
+  void primeHeartbeats();
 
   void ready.then(() => console.log(`[hello-world] host ready (${greeting()})`));
 
-  // Nothing to tear down by hand: the bus responders, the schedule, the MCP
-  // tool, and any in-flight targeted requests are all platform-tracked and
-  // settled on unload. `dispose` is optional, so this mount returns an empty
+  // Nothing to tear down by hand: the responders, the subscriptions, the
+  // schedule, the MCP tool, and any in-flight requests are all platform-tracked
+  // and settled on unload. `dispose` is optional, so this mount returns an empty
   // handle — contrast the worker daemon, whose interval the platform cannot see
   // and which therefore returns a real dispose.
   return {};

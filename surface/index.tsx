@@ -1,24 +1,29 @@
 // ═══════════════════════════════════════════════════════════════════════════
-//  surface/index.tsx — WHAT THE USER SEES (an app)
+//  surface/index.tsx — WHAT THE USER SEES (an application)
 // ═══════════════════════════════════════════════════════════════════════════
 //
-//  TIER: ui (the browser-side half). The host bundles this with esbuild
+//  REALM: surface (the browser-side bundle). The host bundles this with esbuild
 //  (platform: browser, React pinned to this dir's own copy) and renders it in a
-//  same-origin webview. It runs in a DIFFERENT process from server/index.ts, so
-//  the two never share memory — the UI talks to its server ONLY over the bus
-//  (`bus.extension.request` ⇄ the server's `respond`; `bus.extension.subscribe`
-//  ⇐ the server's `publish`).
+//  same-origin webview. It runs in a DIFFERENT process from host/index.ts, so
+//  the two never share memory — a value this file keeps in a module variable is
+//  invisible over there. This bundle holds exactly ONE connection and it is to
+//  the extension's HOST bundle (`context.host.request` ⇄ the host daemon's
+//  `respond`; `context.host.subscribe` ⇐ the host daemon's `publish`). It cannot
+//  address a worker: anything that lives out there is asked of the host bundle,
+//  which relays (see host/index.ts §8).
 //
 //  In Frontier's shell, an extension owns the ENTIRE content rect. You register
-//  exactly ONE app and render your whole UI into the container the host hands
-//  you. There is no shared tab bar or shared sidebar — your app draws its own
-//  layout (a single view here; richer apps compose @frontierengineer/ui's
-//  ExtensionSidebar / ExtensionTabs / Split). This file is the canonical
-//  "hello app": the smallest complete example an author copies to start a new one.
+//  exactly ONE application and render your whole UI into the container the host
+//  hands you. There is no shared tab bar or shared sidebar — your application
+//  draws its own layout (a single view here; richer ones compose
+//  @frontierengineer/ui's ExtensionSidebar / ExtensionTabs / Split). This file is
+//  the canonical "hello application": the smallest complete example an author
+//  copies to start a new one.
 //
 //  THE AUTHORING MODEL. register() is DECLARATION ONLY — it names the components
 //  this extension contributes and nothing else. There is no logic in register():
-//    • surface.application.register — the ONE app; mount(context) renders the whole view
+//    • surface.application.register — the ONE application; mount(context) renders
+//                                     the whole view
 //    • surface.daemons.register     — the headless, always-on components (each
 //                                     with a declared id; one is the norm), the
 //                                     HOME for background logic and for every
@@ -26,23 +31,25 @@
 //                                     visible surface (actions, option sources)
 //
 //  Everything a component does at runtime comes from its MOUNT CONTEXT, never from
-//  register(). The daemon's mount(context) is where the logic lives; the app's
-//  mount(context) is where the view renders. Both contexts ARE a SurfaceContext:
-//  the bus, localSettings, and the applications/sidebars/overlays/modals controls are
-//  reached FLAT on the context (context.bus, context.store, context.modals — no `.services.` hop).
+//  register(). The daemon's mount(context) is where the logic lives; the
+//  application's mount(context) is where the view renders. Both contexts ARE a
+//  SurfaceContext: the host connection, localSettings, and the
+//  applications/sidebars/overlays/modals controls are reached FLAT on the context
+//  (context.host, context.store, context.modals — no `.services.` hop).
 //
 //  ACTIONS, NOT COMMANDS. There is no separate "command" concept: every operation is
 //  an ACTION, and every action automatically appears in the command palette. An action
-//  with `input: null` is a zero-argument action the palette runs directly (the direct
-//  successor to a command + keybinding); an action with an `input` schema gets a
-//  host-generated modal. One declaration is a human modal, an agent tool, and a
+//  with `input: null` is a zero-argument action the palette runs directly, and reads
+//  there as a plain command; an action with an `input` schema gets a host-generated
+//  modal. One declaration is a human modal, an agent tool, and a
 //  schedulable unit — so an action's input schema must always be modal-renderable.
 //
 //  It demonstrates, each clearly separated:
-//    • surface.application.register — the ONE app; mount(context) renders the whole view
+//    • surface.application.register — the ONE application; mount(context) renders
+//                                     the whole view
 //    • context.actions.register (input: null) — (in the daemon) a ZERO-ARGUMENT action: a
 //                                     command-palette entry with a default keybinding,
-//                                     the successor to the old command
+//                                     which is what a keybound command is here
 //    • context.actions.register (input schema) — (in the daemon) a typed, agent-callable
 //                                     ACTION with a live picker field, rendered as a
 //                                     modal by the host and bound to an in-app
@@ -50,14 +57,14 @@
 //                                     agent tool + scheduler; see register())
 //    • <ActionButton>          — bind a button to an action: it runs the action AND
 //                                drives the Info View from its docs, no glue code
-//    • context.bus.extension.*    — calling its own server + rendering live events
-//    • context.workers            — reading the substrate (connected machines)
-//    • context.lifecycle          — running side effects only while focused
-//    • context.modals.prompt      — a host-rendered modal to collect ad-hoc input
+//    • context.host.*          — calling its own host bundle + rendering the events
+//                                that bundle publishes
+//    • context.workers         — reading the substrate (connected workers)
+//    • context.modals.prompt   — a host-rendered modal to collect ad-hoc input
 //    • data-help / data-help-title — hover annotations that feed the Info View
 //
 //  `../../types` is type-only (erased from the bundle); `react` resolves to the
-//  copy this capability vendors (see surface/package.json).
+//  copy this bundle vendors (see surface/package.json).
 
 import { useCallback, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -71,83 +78,103 @@ import { createRoot } from 'react-dom/client';
 // Imported by SUBPATH (`/useAction`), not the package root: the kit's barrel
 // re-exports heavy modules (FileBrowser/MonacoDiff pull in monaco), and esbuild
 // won't tree-shake those out, so importing ActionButton from the root would bloat
-// this minimal app by ~megabytes. The subpath pulls only the action machinery.
+// this minimal application by ~megabytes. The subpath pulls only the action
+// machinery.
 import { ActionButton } from '@frontierengineer/ui/useAction';
-import type { SurfaceProvider, SurfaceApplicationContext, Bus } from '../../types';
-import type { HelloState, WorkerHeartbeat, WorkerInspectReply } from '../messages'; // our own root file (one level up); the host contract is '../../types' (two)
+import type { SurfaceProvider, SurfaceApplicationContext, HostConnection } from '../../types';
+import type { HelloState, WorkerHeartbeat, WorkerInspectResult } from '../messages'; // our own root file (one level up); the host contract is '../../types' (two)
 
-// The app's launcher glyph: an SVG path `d` drawn in a `0 0 16 16` viewBox and
-// stroked in currentColor (the host tints it with the app's color). A globe —
-// the canonical "hello, world" mark, and clean at icon size.
+// The application's launcher glyph: an SVG path `d` drawn in a `0 0 16 16`
+// viewBox and stroked in currentColor (the host tints it with the application's
+// color). A globe — the canonical "hello, world" mark, and clean at icon size.
 const HELLO_ICON = 'M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM1.5 8h13M8 1.5c1.8 1.7 2.8 4 2.8 6.5S9.8 12.8 8 14.5C6.2 12.8 5.2 10.5 5.2 8S6.2 3.2 8 1.5z';
 
-// ── A tiny bus hook: live state from the server ────────────────────────────
-// Fetch the current state once (request → the server's `state.get` responder),
-// then stay live by subscribing to `state.changed` (the server publishes it on
-// every mutation — a bump from here, the MCP tool, or a scheduler tick). This
-// is the whole frontend↔backend loop in one hook.
-function useHelloState(bus: Bus): HelloState | null {
+// ── A tiny hook: live state from the host bundle ────────────────────────────
+// Fetch the current state once (request → the host daemon's `state.get`
+// responder), then stay live by subscribing to `state.changed` (the host daemon
+// publishes it on every mutation — a bump from here, the MCP tool, or a
+// scheduler tick). This is the whole frontend↔backend loop in one hook, and it
+// is a request-then-subscribe pair on purpose: delivery is live signaling with
+// nothing queued across a disconnect, so the one-shot read is what gives a
+// freshly-mounted view its starting value.
+function useHelloState(host: HostConnection): HelloState | null {
   const [state, setState] = useState<HelloState | null>(null);
 
   useEffect(() => {
     let alive = true;
-    bus.extension
+    host
       .request<HelloState>('state.get')
       .then((s) => { if (alive) setState(s); })
       .catch(() => { /* responder briefly absent during a reload — the event below recovers us */ });
 
-    const sub = bus.extension.subscribe('state.changed', (s: HelloState) => setState(s));
+    const sub = host.subscribe<HelloState>('state.changed', (s) => setState(s));
     return () => { alive = false; sub.unsubscribe(); };
-  }, [bus]);
+  }, [host]);
 
   return state;
 }
 
 // ── The greeting SETTING, live ──────────────────────────────────────────────
-// The same request→subscribe loop as state, but for the in-app SETTING. The
-// greeting used to be a host-rendered Config field; now the extension owns its
-// surface (the editor below) and the value round-trips through the server's
-// greeting.get/set (which persist to the durable Store). Fetch once, then stay
-// live on `greeting.changed` so an edit from any surface updates the tile.
-function useGreeting(bus: Bus): string | null {
+// The same request→subscribe loop as state, but for the in-app SETTING. A
+// setting is not host-rendered chrome: the extension owns its editor (below) and
+// the value round-trips through the host daemon's greeting.get/set (which
+// persist to the durable Store). Fetch once, then stay live on
+// `greeting.changed` so an edit from any surface updates the tile.
+function useGreeting(host: HostConnection): string | null {
   const [greeting, setGreeting] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
-    bus.extension
+    host
       .request<{ greeting: string }>('greeting.get')
       .then((g) => { if (alive) setGreeting(g.greeting); })
       .catch(() => { /* responder briefly absent during a reload — the event below recovers us */ });
 
-    const sub = bus.extension.subscribe('greeting.changed', (g: { greeting: string }) => setGreeting(g.greeting));
+    const sub = host.subscribe<{ greeting: string }>('greeting.changed', (g) => setGreeting(g.greeting));
     return () => { alive = false; sub.unsubscribe(); };
-  }, [bus]);
+  }, [host]);
 
   return greeting;
 }
 
-// ── The whole app: one full view, rendered into context.container ──────────────
-// Reads live state, bumps the counter via the server, edits the note via a host
-// modal, and renders the worker heartbeats published straight onto the one bus
-// by each machine's daemon. The app owns its entire rect — a scrollable page.
-function HelloApp({ context }: { context: SurfaceApplicationContext }) {
-  const state = useHelloState(context.bus);
-  const greeting = useGreeting(context.bus);
-  const [heartbeats, setHeartbeats] = useState<Array<{ machine: string; hostname: string; at: string }>>([]);
+// ── The worker heartbeats, live ──────────────────────────────────────────────
+// The same request-then-subscribe pair once more, and this is the case that
+// shows why it is a rule rather than a habit: the workers beat every 30 seconds,
+// so a view that only subscribed would sit empty for up to half a minute with
+// workers plainly connected. The host bundle keeps the latest beat per worker and
+// serves it here, then announces the whole set again on every change — so this
+// hook reads once, then replaces on each event with no merge rule of its own.
+function useWorkerHeartbeats(host: HostConnection): WorkerHeartbeat[] {
+  const [beats, setBeats] = useState<WorkerHeartbeat[]>([]);
 
-  // EVENTS: render the worker daemons' live pushes. There is ONE bus across
-  // the realms, so the daemon's publish() lands here directly — no host-bundle
-  // relay, no re-publish. The envelope names the machine the push came from
-  // (the payload never has to carry routing facts itself).
   useEffect(() => {
-    const sub = context.bus.extension.subscribe('worker.heartbeat', (raw, envelope) => {
-      const msg = raw as WorkerHeartbeat;
-      setHeartbeats((prev) => [{ machine: envelope.machine ?? '?', hostname: msg.hostname, at: msg.at }, ...prev].slice(0, 5));
-    });
-    return () => sub.unsubscribe();
-  }, [context]);
+    let alive = true;
+    host
+      .request<WorkerHeartbeat[]>('worker.heartbeats')
+      .then((list) => { if (alive) setBeats(list); })
+      .catch(() => { /* responder briefly absent during a reload — the event below recovers us */ });
 
-  const bump = useCallback(() => { void context.bus.extension.request('state.bump', { by: 1 }); }, [context]);
+    const sub = host.subscribe<WorkerHeartbeat[]>('worker.heartbeats', (list) => setBeats(list));
+    return () => { alive = false; sub.unsubscribe(); };
+  }, [host]);
+
+  return beats;
+}
+
+// ── The whole application: one full view, rendered into context.container ──────
+// Reads live state, bumps the counter via the host bundle, edits the note via a
+// host modal, and renders the worker heartbeats the host bundle keeps for it.
+// The application owns its entire rect — a scrollable page.
+function HelloApp({ context }: { context: SurfaceApplicationContext }) {
+  const state = useHelloState(context.host);
+  const greeting = useGreeting(context.host);
+  // Everything worker-shaped arrives from the HOST bundle, the only peer this
+  // bundle has: each worker daemon publishes to the host daemon, which knows
+  // which connection spoke and fans the set out here with the worker id folded
+  // in (host/index.ts §8).
+  const heartbeats = useWorkerHeartbeats(context.host);
+
+  const bump = useCallback(() => { void context.host.request('state.bump', { by: 1 }); }, [context]);
 
   // Editing the NOTE is handled by the "hello-world.set_note" ACTION, surfaced via
   // the <ActionButton> in the Note section below — so the same operation is a human
@@ -157,27 +184,28 @@ function HelloApp({ context }: { context: SurfaceApplicationContext }) {
   // exposing (agent-callable, repeatable); reach for modals.prompt for a quick,
   // surface-local input that isn't a first-class operation.
 
-  // EDIT THE GREETING SETTING in-app. This is where the setting lives now — no
-  // host settings panel. Collect the new value with a host modal and send it to
-  // the server's greeting.set (which persists to the Store); the tile updates
-  // live off the greeting.changed event the server publishes.
+  // EDIT THE GREETING SETTING in-app. This is where a setting lives — the host
+  // renders no settings panel for an extension. Collect the new value with a host
+  // modal and send it to the host daemon's greeting.set (which persists to the
+  // Store); the tile updates live off the greeting.changed event that daemon
+  // publishes.
   const editGreeting = useCallback(async () => {
     const result = await context.modals.prompt({
       title: 'Edit greeting',
-      description: 'A per-extension setting, saved on the server in its durable Store.',
+      description: 'A per-extension setting, saved by the host bundle in its durable Store.',
       fields: [{ key: 'greeting', label: 'Greeting', type: 'string', placeholder: null, options: null, required: null, default: greeting ?? '', help: null }],
       submitLabel: 'Save',
     });
-    if (result) void context.bus.extension.request('greeting.set', { greeting: result.greeting });
+    if (result) void context.host.request('greeting.set', { greeting: result.greeting });
   }, [context, greeting]);
 
   return (
     <div style={{ padding: 24, lineHeight: 1.5, fontSize: 14, maxWidth: 640 }}>
       <h2 style={{ marginTop: 0 }}>{greeting ?? 'Hello'} World</h2>
       <p style={{ opacity: 0.8 }}>
-        The reference Frontier extension. The whole page lives in one app that
-        owns its content rect, and everything on it round-trips through the server
-        over the bus — the UI keeps no durable state of its own.
+        The reference Frontier extension. The whole page lives in one application
+        that owns its content rect, and everything on it round-trips through the
+        host bundle — this surface keeps no durable state of its own.
       </p>
 
       <section style={{ margin: '16px 0' }}>
@@ -190,11 +218,11 @@ function HelloApp({ context }: { context: SurfaceApplicationContext }) {
         <button
           onClick={() => { void editGreeting(); }}
           style={{ marginLeft: 8 }}
-          data-help="Edit the greeting shown at the top of this app. It's a per-extension setting saved on the server in its durable Store — there is no host settings panel."
+          data-help="Edit the greeting shown at the top of this application. It's a per-extension setting the host bundle saves in its durable Store — there is no host settings panel."
           data-help-title="Edit greeting"
         >Edit…</button>
         <div style={{ opacity: 0.6, fontSize: 12, marginTop: 2 }}>
-          A setting the extension owns in-app — saved on the server in its Store, no host settings panel.
+          A setting the extension owns in-app — saved by the host bundle in its Store, no host settings panel.
         </div>
       </section>
 
@@ -204,7 +232,7 @@ function HelloApp({ context }: { context: SurfaceApplicationContext }) {
           className="btn-primary"
           onClick={bump}
           style={{ marginLeft: 8 }}
-          data-help="Increment the counter by one. The server persists it to the extension's durable Store and re-renders this app from the state.changed event."
+          data-help="Increment the counter by one. The host bundle persists it to the extension's durable Store and re-renders this application from the state.changed event."
           data-help-title="Bump the counter"
         >Bump</button>
       </section>
@@ -225,14 +253,16 @@ function HelloApp({ context }: { context: SurfaceApplicationContext }) {
 
       <WorkerInspector context={context} />
 
+      {/* One row per worker, showing its latest beat — keyed by the worker id the
+          hub folded in, which is exactly what that id is for. */}
       <section style={{ margin: '16px 0' }}>
-        <strong>Live worker heartbeats</strong> (published by each daemon straight onto the one bus):
+        <strong>Live worker heartbeats</strong> (each worker pushes to the host bundle, which keeps the latest and fans the set out here):
         {heartbeats.length === 0 ? (
-          <p style={{ opacity: 0.6, margin: '4px 0' }}>none yet — connect a machine</p>
+          <p style={{ opacity: 0.6, margin: '4px 0' }}>none yet — connect a worker</p>
         ) : (
           <ul style={{ margin: '4px 0' }}>
-            {heartbeats.map((hb, i) => (
-              <li key={i}>{hb.hostname} @ {new Date(hb.at).toLocaleTimeString()}</li>
+            {heartbeats.map((hb) => (
+              <li key={hb.worker}>{hb.hostname} @ {new Date(hb.at).toLocaleTimeString()}</li>
             ))}
           </ul>
         )}
@@ -242,47 +272,55 @@ function HelloApp({ context }: { context: SurfaceApplicationContext }) {
 }
 
 // ── The worker round-trip, on demand ───────────────────────────────────────
-// Asks the worker daemon DIRECTLY with a targeted bus request — no host-bundle
-// hop. The `{ machine }` target routes the request to that machine's daemon
-// (a slot-scoped call would target `{ reservationId }` instead, and the
-// daemon would read the reservation off its envelope); the platform owns the
-// correlation and the timeout. The reply is data only code beside the
-// machine's files could produce (hostname, cwd, a directory listing).
+// A surface cannot address a worker, so this asks its ONE peer: the host bundle's
+// 'worker.inspect' responder, naming which worker it wants (null = whichever is
+// there). That responder resolves it to one worker, forwards on the worker leg
+// and hands back the outcome (host/index.ts §8); the platform owns the
+// correlation and the timeout on both legs. A success carries data only code
+// beside the worker's files could produce (hostname, cwd, a directory listing).
 function WorkerInspector({ context }: { context: SurfaceApplicationContext }) {
-  const [machine, setMachine] = useState('');
+  const [worker, setWorker] = useState('');
   const [result, setResult] = useState<string>('');
 
-  // List connected machines via the host substrate so the user can pick one.
-  const machines = context.workers.list().filter((m) => m.connected);
+  // List connected workers through the host substrate so the user can pick one.
+  // This is the FLEET (every worker the host knows), which is not quite the same
+  // question as "where is our worker bundle loaded" — only the hub can answer
+  // that, which is why the host daemon does the final resolution and answers with
+  // its failure arm when our bundle is not there.
+  const workers = context.workers.list().filter((w) => w.connected);
 
+  // Both halves of the failure contract, in the order the contract states them.
+  // The EXPECTED outcome is a value: `ok: false` when no worker is running our
+  // bundle, which is an ordinary state on a fresh install and is branched on, not
+  // caught. The UNEXPECTED fault is a rejection: the worker's own responder threw,
+  // or the call timed out, and the catch shows the message the boundary already
+  // reported. Neither path may quietly render as though it had succeeded.
   const inspect = useCallback(async () => {
-    const target = machine || machines[0]?.id;
-    if (!target) { setResult('no connected machine'); return; }
     setResult('inspecting…');
     try {
-      const reply = await context.bus.extension.request<WorkerInspectReply>('worker.inspect', {}, { target: { machine: target } });
-      setResult(JSON.stringify(reply, null, 2));
+      const outcome = await context.host.request<WorkerInspectResult>('worker.inspect', { worker: worker || null });
+      setResult(outcome.ok ? JSON.stringify(outcome.report, null, 2) : `no answer: ${outcome.error}`);
     } catch (err: any) {
-      setResult(`error: ${err?.message || err}`);
+      setResult(`failed: ${err?.message || err}`);
     }
-  }, [context, machine, machines]);
+  }, [context, worker]);
 
   return (
     <section style={{ margin: '16px 0' }}>
-      <strong>Worker inspect</strong> (surface ⇄ worker over the one bus, targeted, correlated reply):
+      <strong>Worker inspect</strong> (surface → host bundle → worker → back, correlated reply):
       <div style={{ margin: '4px 0' }}>
         <select
-          value={machine}
-          onChange={(e) => setMachine(e.target.value)}
-          data-help="Which connected machine to inspect. Leave on the first connected machine to use whichever is available."
-          data-help-title="Target machine"
+          value={worker}
+          onChange={(e) => setWorker(e.target.value)}
+          data-help="Which connected worker to inspect. Leave it on the first connected worker to use whichever is available."
+          data-help-title="Target worker"
         >
-          <option value="">{machines.length ? 'first connected machine' : 'no machines connected'}</option>
-          {machines.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+          <option value="">{workers.length ? 'first connected worker' : 'no workers connected'}</option>
+          {workers.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
         </select>{' '}
         <button
           onClick={() => { void inspect(); }}
-          data-help="Ask the chosen machine's worker to report its hostname, working directory and a short file listing — proving the surface ⇄ worker round-trip with a correlated reply."
+          data-help="Ask the chosen worker to report its hostname, working directory and a short file listing — proving the surface → host → worker round-trip with a correlated reply."
           data-help-title="Inspect the worker"
         >Inspect</button>
       </div>
@@ -298,26 +336,27 @@ export function register(surfaceProvider: SurfaceProvider): void {
   // register() only DECLARES components; the daemon is where logic lives. It is
   // headless and always running while the extension is enabled, so it is the right
   // home for the actions — registrations whose closures must outlive any visible
-  // surface (a palette invocation or an agent call reaches them with no app open).
-  // mount(context) gives it the same runtime substrate a visible component gets: the
-  // context IS a SurfaceContext (context.bus to talk to the server, plus
-  // context.localSettings, context.modals, and the context.workers/context.workspaces substrate),
-  // plus the registration surfaces (context.actions and context.optionSources).
+  // surface (a palette invocation or an agent call reaches them with no application
+  // open). mount(context) gives it the same runtime substrate a visible component
+  // gets: the context IS a SurfaceContext (context.host to talk to the host bundle,
+  // plus context.localSettings, context.modals, and the
+  // context.workers/context.workspaces substrate), plus the registration surfaces
+  // (context.actions and context.optionSources).
   surface.daemons.register({
     id: 'hello-world',
     mount(context) {
       // ── A ZERO-ARGUMENT ACTION: the successor to a command ────────────────
-      // There are no "commands" anymore — every operation is an action, and every
-      // action appears in the command palette (Cmd/Ctrl+Shift+P). An action with
+      // There is no separate "command" concept — every operation is an action, and
+      // every action appears in the command palette (Cmd/Ctrl+Shift+P). An action with
       // `input: null` is a ZERO-ARGUMENT action: the palette runs its run() directly
-      // with no generated modal, and it still carries the palette fields a command
-      // had (category groups it; defaultKey seeds a keybinding). It runs in the
-      // daemon — a separate component from the app's mount — so it can't reach the
-      // app's React state or its container; it acts through the context. Here
-      // it edits the note via its own host prompt and sends it to the server over
-      // the bus; the open app re-renders from the server's `state.changed` event.
-      // Because every action is also agent-callable, write its `description` FOR the
-      // model even when it takes no arguments.
+      // with no generated modal, and it carries the palette fields that make it read
+      // as a command there (category groups it; defaultKey seeds a keybinding). It runs in the
+      // daemon — a separate component from the application's mount — so it can't
+      // reach that view's React state or its container; it acts through the context.
+      // Here it edits the note via its own host prompt and sends it to the host
+      // bundle; the open application re-renders from the host daemon's
+      // `state.changed` event. Because every action is also agent-callable, write
+      // its `description` FOR the model even when it takes no arguments.
       context.actions.register({
         id: 'hello-world.edit-note',
         title: 'Hello World: Edit note',
@@ -336,11 +375,11 @@ export function register(surfaceProvider: SurfaceProvider): void {
         run: async () => {
           const result = await context.modals.prompt({
             title: 'Edit note',
-            description: 'Stored in the extension\'s durable Store on the server.',
+            description: 'Stored by the host bundle in the extension\'s durable Store.',
             fields: [{ key: 'note', label: 'Note', type: 'string', placeholder: null, options: null, required: null, default: null, help: null }],
             submitLabel: 'Save',
           });
-          if (result) void context.bus.extension.request('note.set', { note: result.note });
+          if (result) void context.host.request('note.set', { note: result.note });
         },
       });
 
@@ -349,28 +388,28 @@ export function register(surfaceProvider: SurfaceProvider): void {
       // THE pattern to copy when an operation is worth making first-class. ONE
       // context.actions.register declaration yields THREE things with no extra code:
       //   1. a human modal — the host generates it from `input` (the <ActionButton> in
-      //      the app triggers it; so does the command palette and a host CTA),
+      //      the application triggers it; so does the command palette and a host CTA),
       //   2. an agent tool — frontier.run_action "hello-world.set_note" runs the SAME
       //      run() with the SAME input shape (description is written FOR the model),
       //   3. a schedulable unit — frontier.schedule_action can fire it on a trigger.
       //
       // `input` mixes a plain field with a LIVE PICKER: `note` is a text input, and
-      // `workspace` is a real machine→workspace chooser the host populates from the
+      // `workspace` is a real worker→workspace chooser the host populates from the
       // live fleet — the user never types a raw workspace id, yet the field resolves to
       // one (so an agent passes a workspaceId string directly). That picker is the
       // whole reason an action modal can replace a bespoke cascade modal.
       //
-      // run() executes in THIS daemon (the surface realm; it reaches the server over
-      // the bus), NEVER on the host. It returns an explicit ActionOutcome: a
-      // precondition violation is `{ ok:false, field, error }` (the host modal
-      // highlights that field inline and keeps itself open — try submitting an empty
-      // note), and success returns a value the <ActionButton>'s onResult / an agent
-      // can read.
+      // run() executes in THIS daemon (the surface realm; it reaches the host bundle
+      // over the connection), NEVER on the host. It returns an explicit
+      // ActionOutcome: a precondition violation is `{ ok:false, field, error }` (the
+      // host modal highlights that field inline and keeps itself open — try
+      // submitting an empty note), and success returns a value the
+      // <ActionButton>'s onResult / an agent can read.
       context.actions.register({
         id: 'hello-world.set_note',
         title: 'Set the note',
         description:
-          'Set the Hello World note — the free-text line the app stores in its durable Store. ' +
+          'Set the Hello World note — the free-text line the extension stores in its durable Store. ' +
           'Pass `note` (the text). Optionally pass a `workspace` (a workspaceId; the UI shows a ' +
           'picker) to tag which workspace the note is about — it is appended to the saved text. ' +
           'Returns the saved note. Same operation as the in-app "Set note…" button.',
@@ -381,7 +420,7 @@ export function register(surfaceProvider: SurfaceProvider): void {
         input: {
           fields: [
             { key: 'note', type: 'string', label: 'Note', description: 'The text to store.', required: true, default: null, placeholder: 'Write a note…' },
-            // The LIVE picker: a machine→workspace cascade the host renders and fills
+            // The LIVE picker: a worker→workspace cascade the host renders and fills
             // from the connected fleet. Optional here — omit it and the note is saved
             // as-is. Resolves to a workspaceId string (what an agent would pass).
             { key: 'workspace', type: 'workspace', label: 'About workspace', description: 'Optional — tag the note with a workspace (resolves to its id).', required: null },
@@ -397,7 +436,7 @@ export function register(surfaceProvider: SurfaceProvider): void {
           // the demo SHOWS the id the picker produced.
           const workspaceId = args.workspace ? String(args.workspace) : '';
           const text = workspaceId ? `${note} [re: ${workspaceId}]` : note;
-          await context.bus.extension.request('note.set', { note: text });
+          await context.host.request('note.set', { note: text });
           return { note: text };
         },
       });
@@ -408,13 +447,14 @@ export function register(surfaceProvider: SurfaceProvider): void {
     },
   });
 
-  // ── THE APP: one registration that owns the whole content rect ────────────
+  // ── THE APPLICATION: one registration that owns the whole content rect ────────
   // metadata ({id,title,icon,color}) is declared to the host immediately so the
-  // launcher can draw the icon before the app is ever opened. mount(context) runs
-  // ONCE, the first time the host warms this app's webview; it renders the whole
-  // UI into context.container and returns a teardown handle ({ dispose?: () => void } —
-  // always an object, never null/void; `dispose` is optional, and {} means nothing
-  // to tear down) the host runs if the user quits the app from the launcher.
+  // launcher can draw the icon before the application is ever opened. mount(context)
+  // runs ONCE, the first time the host warms this application's webview; it renders
+  // the whole UI into context.container and returns a teardown handle
+  // ({ dispose?: () => void } — always an object, never null/void; `dispose` is
+  // optional, and {} means nothing to tear down) the host runs if the user quits the
+  // application from the launcher.
   let root: ReturnType<typeof createRoot> | null = null;
   surface.application.register({
     id: 'hello-world',

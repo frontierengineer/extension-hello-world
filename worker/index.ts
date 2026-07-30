@@ -2,39 +2,42 @@
 //  worker/index.ts — NEXT TO THE FILES
 // ═══════════════════════════════════════════════════════════════════════════
 //
-//  REALM: worker (the daemon-side bundle). The host bundles this to a node
+//  REALM: worker (the worker-side bundle). The host bundles this to a node
 //  CJS module and EVERY connected worker daemon fetches + require()s + registers
-//  it on connect — so this code runs ON THE MACHINE, next to its files, not in
-//  the host. Like the surface and host realms, register() is declaration-only.
-//  The worker realm takes THREE kinds of top-level component, mirroring the
-//  surface realm's application/sidebar/daemon: an agent RUNTIME
-//  (w.runtime.register), WORKSPACE kinds (w.workspace.register), and the
-//  general-purpose DAEMONS (w.daemons.register). Hello World contributes only a
-//  daemon; each component's mount() receives its own flat context
-//  (WorkerDaemonContext here) and its logic lives inside.
+//  it on connect — so this code runs ON THE WORKER, next to its files, not in
+//  the host. There are no browser globals and no DOM here: Node built-ins are
+//  available directly, and paths are the worker's real paths. Like the surface
+//  and host realms, register() is declaration-only. The worker realm takes
+//  THREE kinds of top-level component, mirroring the surface realm's
+//  application/sidebar/daemon: an agent RUNTIME (w.runtime.register), WORKSPACE
+//  definitions (w.workspace.register), and the general-purpose DAEMONS
+//  (w.daemons.register). Hello World contributes only a daemon; each component's
+//  mount() receives its own flat context (WorkerDaemonContext here) and its
+//  logic lives inside.
 //
-//  KEY RULE — a worker reaches the UI by going THROUGH its host bundle. A worker
-//  component has NO bus and NO window; the only thing it can talk to is its own
-//  host/ code, over the extension's one bus. To make something appear in the UI it publishes to
-//  the host bundle, and the host bundle re-publishes it on the bus to the UIs (see
-//  host/index.ts §8). This file shows both halves of that:
-//    • it ANSWERS a caller's targeted inspect request (bus.extension.respond — the
-//      platform owns the correlation and the timeout), and
-//    • it PUSHES an unsolicited heartbeat every bus subscriber receives
-//      (bus.extension.publish — fire-and-forget, the streaming half).
+//  KEY RULE — this bundle has exactly ONE peer, and it is the extension's HOST
+//  bundle. There is no window and no way to address a surface: `context.host` is
+//  a connection to host/index.ts and nothing else. So making something appear in
+//  the UI is a two-leg trip — publish to the host bundle, and the host bundle
+//  re-publishes to its surfaces (host/index.ts §8). This file shows both
+//  directions of that one connection:
+//    • it ANSWERS the host bundle's inspect request (host.respond — the platform
+//      owns the correlation and the timeout), and
+//    • it PUSHES an unsolicited heartbeat to the host bundle (host.publish —
+//      fire-and-forget, the streaming half).
 //
-//  Node built-ins (fs/os/path) are imported normally — esbuild keeps them
-//  external in the node CJS bundle. (context.modules is the daemon-located
-//  loader for modules that are NOT bundled — machine-installed packages like
-//  node-pty or an agent SDK; unused here, node built-ins are all we need.)
-//  `../../types` is type-only and erased.
+//  Node built-ins (fs/os) are imported normally — esbuild keeps them external in
+//  the node CJS bundle. (context.modules is the daemon-located loader for
+//  modules that are NOT bundled — worker-installed packages like node-pty or an
+//  agent SDK; unused here, node built-ins are all we need.) `../../types` is
+//  type-only and erased.
 
 import * as fs from 'fs';
 import * as os from 'os';
 import type { WorkerProvider, WorkerDaemonContext } from '../../types';
-import type { WorkerHeartbeat, WorkerInspectReply } from '../messages';
+import type { WorkerInspectReply } from '../messages';
 
-const HEARTBEAT_MS = 30_000; // publish a heartbeat on the bus twice a minute
+const HEARTBEAT_MS = 30_000; // push a heartbeat to the host bundle twice a minute
 const MAX_ENTRIES = 20;      // cap the directory listing we send back
 
 export function register(provider: WorkerProvider): void {
@@ -47,17 +50,17 @@ export function register(provider: WorkerProvider): void {
 }
 
 // The hello-world worker daemon. Its mount() receives the flat
-// WorkerDaemonContext: `bus` is the extension's ONE bus — the same shape every
-// realm holds — and the rest (actions, execute, modules, hostUrl) sits flat
-// beside it (unused here — this component needs only node built-ins). mount
-// returns the component's teardown as `dispose`.
+// WorkerDaemonContext: `host` is this bundle's one connection (to the
+// extension's host bundle) and the rest (actions, execute, modules, hostUrl)
+// sits flat beside it (unused here — this component needs only node built-ins).
+// mount returns the component's teardown as `dispose`.
 function mount(context: WorkerDaemonContext): { dispose?: () => void } {
-  const { bus } = context;
+  const { host } = context;
 
-  // ── Inspect the machine — something only code beside the files can do ──────
-  // Read the hostname, the cwd, and a short listing of that directory. In
-  // production the daemon's cwd is the machine's working area, so this proves
-  // the code is genuinely running on the remote machine, not the host.
+  // ── Inspect this worker — something only code beside the files can do ──────
+  // Read the hostname, the cwd, and a short listing of that directory. The
+  // daemon's cwd is the worker's working area, so this proves the code is
+  // genuinely running out there, not in the host process.
   function inspect(): WorkerInspectReply {
     const cwd = process.cwd();
     let entries: string[] = [];
@@ -74,33 +77,36 @@ function mount(context: WorkerDaemonContext): { dispose?: () => void } {
     };
   }
 
-  // ── Direction 1: ANSWER a caller's request ──────────────────────────────────
-  // A surface (or host daemon) calls `bus.extension.request('worker.inspect',
-  // {}, { target: { machine } })`; the responder registered here returns the
-  // answer and the PLATFORM carries it back to the awaiting promise — the
-  // correlation and the timeout are the bus's job, so neither side mints
-  // request ids or matches replies by hand. The target selects the realm: a
-  // request WITH a target lands on this machine's responder, one WITHOUT stays
-  // among the surface/host responders. The envelope carries the routing facts:
-  // a slot-scoped call would arrive with `envelope.reservationId` set, which
-  // is how one daemon serves every slot on its machine without the payload
-  // naming them. A respond() for a type is a per-type upsert across the
-  // extension's daemons on this machine.
-  bus.extension.respond('worker.inspect', (_payload, _envelope) => inspect());
+  // ── Direction 1: ANSWER the host bundle's request ───────────────────────────
+  // host/index.ts §8 calls `host.request('inspect', { worker })`; the responder
+  // registered here returns the answer and the PLATFORM carries it back to the
+  // awaiting promise — the correlation and the timeout are the connection's job,
+  // so neither side mints request ids or matches replies by hand. The handler
+  // receives the payload only: there is no envelope to read and no sender to
+  // disambiguate, because this connection has exactly one peer. Throwing here is
+  // correct for an unexpected fault — the shared boundary reports it once and
+  // rejects the host bundle's `request`, so nothing is silently dropped. A
+  // respond() for a type is a per-type upsert across the extension's daemons on
+  // this worker.
+  host.respond('inspect', () => inspect());
 
-  // ── Direction 2: PUSH unsolicited heartbeats to every subscriber ────────────
-  // Nothing asked for these. The daemon decides on its own to report it's
-  // alive; every surface/host subscriber of 'worker.heartbeat' receives the
-  // publish with an envelope naming this machine — no relay, no re-publish.
-  // Fire-and-forget traffic like this stays on publish()/subscribe(); a
-  // publish while the daemon link is down is dropped with a log, so a brief
-  // disconnect is harmless.
+  // The same liveness fact, ANSWERABLE on demand. The push below is on our
+  // schedule, not the host bundle's, so a host bundle that has just loaded would
+  // otherwise have to wait out an interval it does not control before it knew
+  // anything. Anything a daemon streams should also be askable.
+  host.respond('beat', () => ({ hostname: os.hostname(), at: new Date().toISOString() }));
+
+  // ── Direction 2: PUSH unsolicited heartbeats to the host bundle ─────────────
+  // Nothing asked for these. The daemon decides on its own to report it is
+  // alive, and the publish goes to its one peer: the host bundle, whose
+  // 'heartbeat' subscriber knows which connection spoke and re-publishes to the
+  // surfaces with our worker id folded in. We do NOT name ourselves in the
+  // payload — the hub is the honest source of that fact. A publish while the
+  // connection is down is dropped with a log rather than queued (it is live
+  // signaling, not a mailbox), so a brief disconnect is harmless: the next beat
+  // carries the same information.
   function beat(): void {
-    const msg: WorkerHeartbeat = {
-      hostname: os.hostname(),
-      at: new Date().toISOString(),
-    };
-    bus.extension.publish('worker.heartbeat', msg);
+    host.publish('heartbeat', { hostname: os.hostname(), at: new Date().toISOString() });
   }
 
   beat(); // one immediately on connect, so a UI sees life right away
